@@ -5,7 +5,10 @@ Priority: optional
 Architecture: amd64
 Maintainer: @MAINT@
 Installed-Size: @INSTALLED_SIZE@
-Depends: curl
+Depends: curl,
+ libxkbcommon-x11-0, libxcb-cursor0, libxcb-icccm4, libxcb-image0,
+ libxcb-keysyms1, libxcb-render-util0, libxcb-shape0, libxcb-xkb1,
+ libgl1, libegl1
 Homepage: @HOMEPAGE@
 Description: FOREST's Proxy Auto-updater — автообновляемый прокси на ядре Xray
  Программа сама скачивает публичные списки прокси-серверов, проверяет их
@@ -25,3 +28,20 @@ Description: FOREST's Proxy Auto-updater — автообновляемый пр
  curl -x http://127.0.0.1:10808 -o /dev/null -w '%{http_code}\n'
  https://www.gstatic.com/generate_204
  (ожидается 204; первые минуты уходят на подбор рабочих серверов).
+ .
+ Помощник интерфейса (forest-ui, Qt6) рисует значок в трее, меню и уведомления.
+ Плагины платформ Qt (xcb/wayland) и библиотеки Qt едут В КОМПЛЕКТЕ; системные
+ библиотеки объявлены в зависимостях (libxkbcommon-x11-0, libxcb-cursor0,
+ libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-render-util0,
+ libxcb-shape0, libxcb-xkb1, libgl1, libegl1).
+ .
+ ОГРАНИЧЕНИЯ ПРОВЕРКИ (RU): Проверка пакета выполнялась в среде WSL (Linux
+ внутри Windows), а не на установленной системе на реальном железе. Меню и
+ уведомления в графическом интерфейсе протестированы логически, но НЕ проверены
+ на живом рабочем столе — возможны ошибки. Если что-то не работает, сообщите в
+ репозитории.
+ .
+ TESTING SCOPE (EN): Package testing was performed in WSL (Linux on Windows),
+ not on a real installation on bare metal. The GUI menu and notifications are
+ tested logically but have NOT been verified on a live desktop — issues are
+ possible. If something does not work, please report it in the repository.

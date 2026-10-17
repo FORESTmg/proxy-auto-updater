@@ -1,0 +1,169 @@
+{
+ "geometry": [
+  2575,
+  1207,
+  392,
+  172
+ ],
+ "screen": "LG HDR 4K",
+ "screen_geometry": [
+  2560,
+  0,
+  2560,
+  1440
+ ],
+ "frames": 10,
+ "frame_times_ms": [
+  3.5,
+  150.4,
+  295.9,
+  446.6,
+  597.2,
+  755.1,
+  906.0,
+  1058.1,
+  1209.6,
+  1364.8
+ ],
+ "card_png": "D:/ForestProxyUpdater/docs\\notify-card.png",
+ "screen_png": "D:/ForestProxyUpdater/docs\\notify-card-screen.png",
+ "hold_png": "D:/ForestProxyUpdater/docs\\notify-card-hold.png",
+ "card_hashes": [
+  "44219d6863b54155",
+  "f00704b4fc6a98c2",
+  "0c8135cc52a6c75e",
+  "292ac278ec696b19",
+  "741ba337ea7c9b98",
+  "47dfca2607b9b934",
+  "d178415a3158a69e",
+  "a181b29a28d07a6c",
+  "322aa71d6cc13a51",
+  "76b66d08263bc314"
+ ],
+ "spinner_hashes": [
+  "f1a1acd62e95f5d9",
+  "e3f3d6d7f5d8e751",
+  "92d31f833bf41396",
+  "819fad1aa05352ce",
+  "9d9dcc69938250cd",
+  "fe0fd81d0dce2e81",
+  "256254ee6bef9ac4",
+  "5fc341512c4e6680",
+  "c7f6c0c407a19142",
+  "422cbcff2adda375"
+ ],
+ "bar_hashes": [
+  "af36f7345de5d422",
+  "91a6122e8b52075e",
+  "28a13a477578ea30",
+  "a3b3f4cc3e652904",
+  "be8ff78bf430d7b6",
+  "da6f4906cb25f9a5",
+  "7320c775cad51a4b",
+  "ce73503f4a41ab08",
+  "f69d7a9cf9f84c11",
+  "1bf045f96e02cc1c"
+ ],
+ "spinner_changed_px": [
+  121,
+  130,
+  132,
+  138,
+  139,
+  134,
+  136,
+  135,
+  134
+ ],
+ "bar_changed_px": [
+  336,
+  648,
+  712,
+  728,
+  748,
+  696,
+  384,
+  320,
+  560
+ ],
+ "card_changed_px": [
+  540,
+  939,
+  1022,
+  1046,
+  1073,
+  1002,
+  614,
+  532,
+  833
+ ],
+ "spinner_unique": 10,
+ "bar_unique": 10,
+ "card_unique": 10,
+ "spinner_min_changed": 121,
+ "bar_min_changed": 320,
+ "texts": {
+  "title": "Связь восстановлена",
+  "sub": "связь подтверждена · 4.94 с",
+  "footer": "восстановлено за 4.94 с · окно закроется через 4 с",
+  "phase": "hold",
+  "kind": "ok",
+  "role": "restore",
+  "pct": 100.0,
+  "final": true,
+  "failed": false,
+  "step_names": [
+   "Обрыв обнаружен (пульс порта)",
+   "Разрыв связи: перезапуск ядра",
+   "Данные подтверждены (204 + TLS)"
+  ],
+  "step_ms": [
+   50,
+   765,
+   4938
+  ],
+  "steps": [
+   "Обрыв обнаружен (пульс порта)   50 мс",
+   "Разрыв связи: перезапуск ядра   765 мс",
+   "Данные подтверждены (204 + TLS)   4938 мс"
+  ]
+ },
+ "stats": {
+  "frames": 0,
+  "avg_fps": 0.0,
+  "avg_paint_fps": 0.0,
+  "worst_ms": 0.0,
+  "dropped": 0,
+  "frames_seen": 10,
+  "run_avg_fps": 7.3,
+  "run_worst_ms": 159.8
+ },
+ "composition": {
+  "icon": true,
+  "icon_px": [
+   32,
+   32
+  ],
+  "title": true,
+  "sub": true,
+  "steps": true,
+  "steps_n": 3,
+  "steps_text": [
+   "Обрыв обнаружен (пульс порта)   50 мс",
+   "Разрыв связи: перезапуск ядра   765 мс",
+   "Данные подтверждены (204 + TLS)   4938 мс"
+  ],
+  "bar": true,
+  "bar_w": 314,
+  "spinner": true,
+  "footer": true,
+  "footer_text": "восстановлено за 4.94 с · окно закроется через 4 с"
+ },
+ "request": {
+  "dir": "D:/ForestProxyUpdater/docs",
+  "name": "notify-card",
+  "frames": 10,
+  "note": "FINAL real outage card"
+ },
+ "ts": 1792266527.6663852
+}

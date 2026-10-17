@@ -22,6 +22,11 @@ _REPO = os.path.dirname(_HERE)
 _SRC = os.path.join(_REPO, "src")
 _ICON = os.path.join(_HERE, "app.ico")
 _EXAMPLE = os.path.join(_REPO, "config.example.json")
+# Утверждённый макет вида уведомления едет В КОМПЛЕКТЕ: его числа сверяет
+# самотест (--selftest) и у собранной программы, а не только из репозитория.
+_MOCKUP = os.path.join(_REPO, "docs", "notify-mockup.html")
+# Макет меню трея тоже едет в комплекте: цвета/геометрия меню сверяются с ним.
+_MENU_MOCKUP = os.path.join(_REPO, "docs", "menu-mockup.html")
 
 for _f in (_ICON, _EXAMPLE, os.path.join(_SRC, "forest_ui.py")):
     if not os.path.isfile(_f):
@@ -30,12 +35,17 @@ for _f in (_ICON, _EXAMPLE, os.path.join(_SRC, "forest_ui.py")):
 # Наши модули подключаем явно: часть из них импортируется лениво (внутри функций)
 HIDDEN = [
     "config", "i18n", "log", "notify", "theme", "tray_icon", "tray_menu",
-    "tray_status", "ui_cmd", "ui_helper", "clientwrite", "clientwrite_posix",
+    "tray_status", "ui_cmd", "ui_helper", "ui_menu", "ui_style",
+    "clientwrite", "clientwrite_posix",
     "clientwrite_v2rayn", "instancelock", "watchdog", "parser", "netfilters",
     "safestdio",
 ]
 
 DATAS = [(_ICON, "."), (_EXAMPLE, ".")]
+if os.path.isfile(_MOCKUP):
+    DATAS.append((_MOCKUP, os.path.join("docs")))
+if os.path.isfile(_MENU_MOCKUP):
+    DATAS.append((_MENU_MOCKUP, os.path.join("docs")))
 
 # QML/Quick/сеть помощнику не нужны: он рисует значок, меню и уведомление.
 # Убираем — не из экономии ради экономии, а чтобы в комплект не попадали

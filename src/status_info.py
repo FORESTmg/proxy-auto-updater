@@ -195,7 +195,9 @@ def notif(proc: dict) -> dict:
     if failed:
         sub = SUB_FAILED
     elif final:
-        sub = f"связь подтверждена · {elapsed:.2f} с"
+        # «0.00 с» не печатаем: если время неизвестно, числа просто нет
+        sub = (f"связь подтверждена · {elapsed:.2f} с" if elapsed > 0
+               else "связь подтверждена")
     elif is_restore:
         sub = SUB_RESTORE
     else:
@@ -207,11 +209,18 @@ def notif(proc: dict) -> dict:
                       "done": bool(s.get("done")),
                       "failed": bool(s.get("failed"))})
     if failed:
-        footer = f"попытка заняла {elapsed:.2f} с · окно закроется через 4 с"
+        # «0.00 с» не печатаем: нет замера — нет числа
+        footer = (f"попытка заняла {elapsed:.2f} с · окно закроется через 4 с"
+                  if elapsed > 0 else
+                  "попытка не удалась · окно закроется через 4 с")
     elif final:
-        footer = f"восстановлено за {elapsed:.2f} с · окно закроется через 4 с"
+        footer = (f"восстановлено за {elapsed:.2f} с · окно закроется через 4 с"
+                  if elapsed > 0 else "восстановлено · окно закроется через 4 с")
     else:
-        footer = f"прошло {elapsed:.2f} с · ожидание ~{eta_s:.1f} с"
+        footer = (f"прошло {elapsed:.2f} с · ожидание ~{eta_s:.1f} с"
+                  if elapsed > 0 else
+                  (f"ожидание ~{eta_s:.1f} с" if eta_s > 0
+                   else "наблюдение включено"))
     return {"title": title, "sub": sub, "pct": max(0, min(100, pct)),
             "steps": steps, "footer": footer, "elapsed": elapsed,
             "eta_s": eta_s, "final": final, "failed": failed,
@@ -244,6 +253,32 @@ def step_lines_ms(proc: dict) -> list:
         ms = int(round(s["t"] * 1000.0))
         out.append(f"{mark} {s['nm']}   {ms} мс ({s['t']:.2f} с)")
     return out
+
+
+def steps_data(proc: dict) -> list:
+    """Этапы процесса СТРУКТУРОЙ — для карточки уведомления (1:1 с макетом).
+
+    ``[{'nm', 'ms', 'done', 'failed', 'at'}]``: время каждого этапа В
+    МИЛЛИСЕКУНДАХ, ``at`` — доля общего времени (время этапа / время последнего
+    этапа). По ``at`` карточка решает, когда этап показать: ровно так же считает
+    макет (``at = ms / TOTAL``), поэтому порядок и моменты появления совпадают.
+    """
+    steps = notif(proc).get("steps") or []
+    total = max([float(s["t"]) for s in steps] or [0.0])
+    out = []
+    for s in steps:
+        ms = int(round(float(s["t"]) * 1000.0))
+        at = (float(s["t"]) / total) if total > 0 else 0.0
+        out.append({"nm": s["nm"], "ms": ms, "done": bool(s["done"]),
+                    "failed": bool(s["failed"]),
+                    "at": max(0.0, min(1.0, at))})
+    return out
+
+
+def steps_total_ms(proc: dict) -> int:
+    """Общая длительность процесса для полосы времени: время последнего этапа."""
+    steps = notif(proc).get("steps") or []
+    return int(round(max([float(s["t"]) for s in steps] or [0.0]) * 1000.0))
 
 
 def recovery_ms_text(proc: dict, lang: str = "ru") -> str:

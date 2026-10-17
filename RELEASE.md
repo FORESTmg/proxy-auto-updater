@@ -14,31 +14,35 @@
 | Что | Файл |
 |---|---|
 | Версия приложения (в ресурсах exe) | `packaging\version_info.txt` |
+| Версия Linux-пакетов | `packaging-linux\lib\common.sh` (`VERSION`, переопределяется `FOREST_PKG_VERSION`) |
 | Версия ядра Xray (вшито в exe) | `packaging\core_version.txt`, `packaging\core.lock.json` |
 | История изменений | `CHANGELOG.md` |
 | Сборка | `packaging\build.bat` → `packaging\build.ps1` |
 | Спек PyInstaller | `packaging\ForestProxyUpdater.spec` |
 | Результат сборки | `packaging\dist\ForestProxyUpdater.exe` (+ `.sha256`, `build-report.json`) |
-| Заметки о выпуске | `docs\RELEASE-NOTES-1.0.0.md` |
+| Заметки о выпуске | `docs\RELEASE-NOTES-<версия>.md` |
 
-Версия приложения объявлена **только** в `packaging\version_info.txt`
-(`filevers`/`prodvers` = `1, 0, 0, 0`, `ProductVersion` = `1.0.0`). В коде
-`src\*.py` константы версии нет — править её там не нужно.
+Версия приложения объявлена в **двух** местах, и они обязаны совпадать:
+`packaging\version_info.txt` (ресурсы exe — `filevers`/`prodvers` = `1, 3, 0, 0`,
+`FileVersion` = `1.3.0.0`, `ProductVersion` = `1.3.0`) и
+`packaging-linux\lib\common.sh` (`VERSION="1.3.0"` — имя и версия Linux-пакетов).
+В коде `src\*.py` константы версии нет — править её там не нужно.
 Версия ядра Xray (`core_version.txt`) к версии программы отношения не имеет.
+Расхождение этих двух файлов уже приводило к тому, что сборки помечались и 1.3.0, и 1.3.1;
+перед выпуском сверять оба (`grep -n VERSION packaging-linux/lib/common.sh` и
+`grep -n "filevers\|ProductVersion" packaging/version_info.txt`).
 
 ---
 
 ## 1. Обновить версию
 
 1. В `packaging\version_info.txt` поставить нужные значения:
-   - `filevers=(1, 0, 0, 0)` и `prodvers=(1, 0, 0, 0)`;
-   - `FileVersion` = `1.0.0.0`, `ProductVersion` = `1.0.0`.
-   Для 1.0.0 файл уже заполнен так — если версия не меняется, шаг пропустить.
-
-2. В `CHANGELOG.md` должна быть секция релиза `## [1.0.0] — 2026`
-   (формат Keep a Changelog). Для 1.0.0 она уже есть.
-
-3. Проверить, что в `packaging\core_version.txt` стоит актуальный релиз ядра
+   - `filevers=(1, 3, 0, 0)` и `prodvers=(1, 3, 0, 0)`;
+   - `FileVersion` = `1.3.0.0`, `ProductVersion` = `1.3.0`.
+2. В `packaging-linux\lib\common.sh` — та же версия в `VERSION` (по умолчанию).
+3. В `CHANGELOG.md` должна быть секция релиза `## [1.3.0] — 2026-10-18`
+   (формат Keep a Changelog).
+4. Проверить, что в `packaging\core_version.txt` стоит актуальный релиз ядра
    (`v26.3.27`) и он совпадает с `packaging\core.lock.json` (`release`).
    Обе строки обновлять вместе.
 
@@ -210,23 +214,35 @@ GitHub Release**, не коммитить в git.
 ```
 git add -A
 git status --short
-git commit -m "Release 1.0.0"
+git commit -m "Release 1.3.0"
 ```
 
-В коммите не должно быть `config.json`, `state/`, `logs/`, `*.pid` и личных
-путей. Перед публикацией репозиторий — **приватный**; сделать его публичным
-можно позже отдельным осознанным действием.
+В коммите не должно быть `config.json`, `state/`, `logs/`, `*.pid`, готовых
+артефактов (`.exe`, `packaging-linux/out/`) и личных путей.
+
+**Куда пушить.** Публичный репозиторий — это ремоут **`proxy`**
+(`github.com/FORESTmg/proxy-auto-updater`, ветка `main`);
+ремоут `origin` указывает на **приватный** репозиторий и для выпуска не используется.
+
+```
+git push proxy main
+```
+
+Проверить, что репозиторий остался публичным и описание нейтральное:
+
+```
+gh api repos/FORESTmg/proxy-auto-updater --jq '{description,private,visibility,default_branch}'
+```
 
 ---
 
-## 6. Создать тег `v1.0.0`
+## 6. Создать тег `v1.3.0`
 
 Аннотированный тег, имя совпадает с версией:
 
 ```
-git tag -a v1.0.0 -m "FOREST's Proxy Auto-updater 1.0.0"
-git push origin master
-git push origin v1.0.0
+git tag -a v1.3.0 -m "FOREST's Proxy Auto-updater 1.3.0"
+git push proxy v1.3.0
 ```
 
 Проверить:
@@ -238,30 +254,29 @@ git log --oneline -1
 
 ---
 
-## 7. Создать GitHub Release и приложить `.exe`
+## 7. Создать GitHub Release и приложить все артефакты
 
-Вариант через `gh` CLI (из корня репозитория):
+Набор файлов — как в прошлых выпусках (9 артефактов, к каждому `.sha256`,
+плюс сводная `SHA256SUMS`): `ForestProxyUpdater.exe`, `forest-ui.exe`,
+`forest-proxy-updater-linux-x86_64`, `forest-ui-linux-x86_64`, `.deb`, `.rpm`,
+Arch `.pkg.tar.zst`, `.tar.gz`, `AppImage`.
 
 ```
-gh release create v1.0.0 ^
-   "packaging\dist\ForestProxyUpdater.exe" ^
-   "packaging\dist\ForestProxyUpdater.exe.sha256" ^
-   --title "FOREST's Proxy Auto-updater 1.0.0" ^
-   --notes-file docs\RELEASE-NOTES-1.0.0.md
+gh release create v1.3.0 --repo FORESTmg/proxy-auto-updater ^
+   --title "v1.3.0 — ..." ^
+   --notes-file "C:/Users/<user>/.../rel130/RELEASE-NOTES-1.3.0.md" ^
+   "C:/Users/<user>/.../rel130/*"
 ```
 
-(`^` — перенос строки в cmd; в PowerShell используйте `` ` `` или одну строку.)
-
-Вариант через веб-интерфейс: *Releases → Draft a new release* → выбрать тег
-`v1.0.0` → заголовок → вставить текст из `docs\RELEASE-NOTES-1.0.0.md` →
-приложить `ForestProxyUpdater.exe` (и, по желанию, `.sha256`) как бинарные
-ассеты → Publish.
+Пути для `gh.exe` — только в форме `C:/...` (MSYS-путь `/c/...` он не принимает).
 
 Правила:
 
-- прикладывать **собранный файл**, а не ссылку на временный артефакт сборки;
-- имя тега и версия в заголовке должны совпадать (`v1.0.0` / `1.0.0`);
-- SHA-256 в описании — от **того самого** приложенного файла.
+- прикладывать **собранные файлы**, а не временные артефакты сборки;
+- имя тега и версия в заголовке должны совпадать (`v1.3.0` / `1.3.0`);
+- каждый SHA-256 — от **того самого** приложенного файла; после публикации
+  сверить список ассетов через API (имена и размеры), а не только вывод команды;
+- артефакты в git не добавляются — они живут только в релизе.
 
 ---
 

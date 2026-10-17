@@ -40,7 +40,22 @@ HELPER_ENV = "FOREST_UI"
 
 
 def we_are_helper() -> bool:
-    return os.environ.get(HELPER_ENV) == "1"
+    """Мы — процесс помощника? Признак окружения И (в сборке) имя своего файла.
+
+    Одного признака мало: он приходит по наследству вместе с окружением, и
+    «помощником» мог бы считать себя супервизор — тогда он никогда не поднял бы
+    настоящий помощник и на рабочем столе не было бы значка. В сборке сверяем имя
+    исполняемого файла (``forest-ui.exe`` / ``forest-ui``); из исходников признак
+    ставит сам помощник в ``forest_ui.main``, и там доверяем ему.
+    """
+    if os.environ.get(HELPER_ENV) != "1":
+        return False
+    if not getattr(sys, "frozen", False):
+        return True
+    try:
+        return os.path.basename(sys.executable).lower().startswith("forest-ui")
+    except Exception:
+        return True
 
 
 def _state_dir(cfg: dict) -> str:
@@ -152,20 +167,96 @@ def enabled(cfg: dict) -> bool:
 
 
 def _pid_alive(pid: int) -> bool:
+    """Живой ли процесс: проверяем ЗАВЕРШЕНИЕ нулевым таймаутом, а не OpenProcess.
+
+    Успешный ``OpenProcess`` НЕ доказывает, что процесс жив: он отвечает успехом
+    и для завершённого, но ещё не освобождённого процесса, и для переиспользо-
+    ванного pid. Реальный случай на живом ПК: в пульсе остался pid 31800, самого
+    процесса нет, а ``OpenProcess`` давал хендл — супервизор считал помощник
+    работающим и никогда его не поднимал (в трее не было значка).
+    ``WaitForSingleObject(h, 0)`` различает состояния: WAIT_TIMEOUT — процесс ещё
+    работает, WAIT_OBJECT_0 — уже завершился.
+    """
     if pid <= 0:
         return False
     try:
         if IS_WIN:
             import ctypes
-            h = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))
+            from ctypes import wintypes
+            k = ctypes.windll.kernel32
+            k.OpenProcess.restype = ctypes.c_void_p
+            k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL,
+                                      wintypes.DWORD]
+            k.WaitForSingleObject.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+            k.WaitForSingleObject.restype = wintypes.DWORD
+            k.CloseHandle.argtypes = [ctypes.c_void_p]
+            # SYNCHRONIZE (0x00100000) нужен WaitForSingleObject: без него вызов
+            # падает и «живой» процесс выглядел бы мёртвым
+            h = k.OpenProcess(0x1000 | 0x00100000, False, int(pid))
             if not h:
                 return False
-            ctypes.windll.kernel32.CloseHandle(h)
-            return True
+            try:
+                return k.WaitForSingleObject(h, 0) == 0x00000102   # WAIT_TIMEOUT
+            finally:
+                k.CloseHandle(h)
         os.kill(int(pid), 0)
         return True
     except Exception:
         return False
+
+
+def _pid_image(pid: int) -> str:
+    """Путь исполняемого файла процесса ('' — узнать не удалось)."""
+    try:
+        if IS_WIN:
+            import ctypes
+            from ctypes import wintypes
+            k = ctypes.windll.kernel32
+            k.OpenProcess.restype = ctypes.c_void_p
+            k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL,
+                                      wintypes.DWORD]
+            k.QueryFullProcessImageNameW.argtypes = [
+                ctypes.c_void_p, wintypes.DWORD, wintypes.LPWSTR,
+                ctypes.POINTER(wintypes.DWORD)]
+            k.QueryFullProcessImageNameW.restype = wintypes.BOOL
+            k.CloseHandle.argtypes = [ctypes.c_void_p]
+            h = k.OpenProcess(0x1000, False, int(pid))
+            if not h:
+                return ""
+            try:
+                buf = ctypes.create_unicode_buffer(32768)
+                size = wintypes.DWORD(len(buf))
+                if k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                    return buf.value
+            finally:
+                k.CloseHandle(h)
+        else:
+            return os.path.realpath("/proc/%d/exe" % int(pid))
+    except Exception:
+        return ""
+    return ""
+
+
+def _is_our_helper(pid: int, cfg: dict) -> bool:
+    """Действительно ли по этому pid работает НАШ помощник.
+
+    Пульс мог остаться от упавшего помощника, а pid — достаться чужому процессу.
+    Сверяем имя файла процесса и, если путь известен, что это ровно наш файл
+    помощника. Не смогли убедиться — считаем «не наш»: исключительность держит
+    ЗАМОК (``instancelock``), а не эта проверка.
+    """
+    img = _pid_image(pid)
+    if not img:
+        return False
+    try:
+        if os.path.basename(img).lower() != helper_name().lower():
+            return False
+        want = helper_path(cfg)
+        if want and os.path.abspath(img).lower() != os.path.abspath(want).lower():
+            return False
+    except Exception:
+        return False
+    return True
 
 
 def running_pid(cfg: dict) -> int:
@@ -185,7 +276,7 @@ def running_pid(cfg: dict) -> int:
         pid = int(d.get("pid", 0) or 0)
         if pid == os.getpid():
             return 0
-        if _pid_alive(pid):
+        if _pid_alive(pid) and _is_our_helper(pid, cfg):
             return pid
     except Exception:
         return 0

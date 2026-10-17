@@ -10,6 +10,14 @@ own server list, writes the Xray-core config itself, starts and stops
 `xray.exe` itself and sets/clears the Windows system proxy itself. An optional
 v2rayN mode is available for people who already use v2rayN.
 
+## Testing scope (Linux)
+
+**Package testing was performed in WSL (Linux on Windows), not on a real installation on bare metal. The GUI menu and notifications are tested logically but have NOT been verified on a live desktop — issues are possible. If something does not work, please report it in the repository.**
+
+**ОГРАНИЧЕНИЯ ПРОВЕРКИ (RU):** Проверка пакета выполнялась в среде WSL (Linux внутри Windows), а не на установленной системе на реальном железе. Меню и уведомления в графическом интерфейсе протестированы логически, но НЕ проверены на живом рабочем столе — возможны ошибки. Если что-то не работает, сообщите в репозитории.
+
+The Windows build is tested on a live PC and carries no such caveat.
+
 - License: **GPL-3.0-only** (see [`LICENSE`](LICENSE))
 - Languages: Russian + English (see [`README.ru.md`](README.ru.md))
 - Vibe-coded — written iteratively in close dialogue with an AI assistant, so
@@ -189,7 +197,7 @@ both interfaces, so nothing is lost:
 |---|---|
 | icon tooltip | `FOREST <link state> \| <N> servers \| <RU route> \| watch OK` (four fields, same order) |
 | icon colour | six states: green `связь OK`, grey `выключено вручную`, amber `переключение` / `сторож молчит (нет данных)`, red `НЕТ СВЯЗИ`, blue `восстановление связи` |
-| notification card | title (`Восстановление связи` / `Переключение сервера` / `Связь восстановлена` / `Переключение завершено` / `Восстановить не удалось`), subtitle, percentage, the step list with per-step times **in milliseconds** (`50 мс (0.05 с)`, `350 мс (0.35 с)`, …) and the footer |
+| notification card | title (`Восстановление связи` / `Переключение сервера` / `Связь восстановлена` / `Переключение завершено` / `Восстановить не удалось`), subtitle, a **step block with each step's time in milliseconds** (`Обрыв обнаружен (пульс порта)   50 мс`), a time bar, a spinner and the footer |
 | link recovery time | `связь подтверждена · N.NN с` in the subtitle and `восстановлено за N.NN с (NNNN мс) · окно закроется через 4 с` in the footer; also kept in the menu after the card closes |
 | menu | open log, open status, enable/disable the proxy by hand, quit — plus supervision, notifications, **“Filters” (RU direct; Cloudflare bypass)**, theme, “refresh now” and about |
 
@@ -214,13 +222,25 @@ The main program stays small and needs no third-party packages; the helper draws
   on/off, **“Filters” → “RU direct” / “Cloudflare bypass” (two checkable
   items)**, **theme (follow system / light / dark)**, "Refresh servers now",
   "Test notification", "Open log", "About", "Quit";
-* **notifications** — a frameless translucent card with rounded corners, shadow
-  and your icon. The animation has three phases and is **actually visible**:
-  the entrance slides in 48 px from the right and fades in over **350 ms**, the
-  hold is alive (a spinner turns by the icon and the progress bar is eased), and
-  the exit slides back and fades out over 260 ms. All at **60 frames per second**,
-  without flicker, and it **never takes keyboard focus** from the window you are
-  working in. Recovery steps are shown **with their duration in milliseconds**.
+* **notifications** — a card **exactly as in the approved mock-up**
+  (`docs/notify-mockup.html`; it ships inside the bundle and the selftest compares
+  its numbers with the code): 392 px wide, radius 12, a 3 px state stripe on the
+  left, a 34×34 icon tile, a spinner on the right, a **step block with each
+  step's time in milliseconds**, a time bar and a footer. Your own `app.ico` sits
+  inside — the same file and the same code path as the tray icon (verified pixel
+  by pixel: **1024 of 1024 pixels match the tray icon**). The entrance slides in
+  420 px with the mock-up's curve over **340 ms**, the exit takes **260 ms**, the
+  spinner turns once per 0.85 s. Frames run on an absolute **60 fps** grid
+  (measured on the live PC: **60.1 fps** average, 388 frames, worst frame
+  **22.7 ms**, no dropped frames and no stalls); only the window position and its
+  opacity change, while the background, icons and texts are rendered **once** into
+  a separate layer — so there is nothing to flicker. It **never** takes focus: the
+  selftest watches the foreground window for the whole animation and never sees
+  the card as the active window.
+* **the final state happens in the same card**: when the supervisor reports the end
+  of the process, the card on screen changes state (title `Связь восстановлена`,
+  subtitle `связь подтверждена · N.NN с`, footer `восстановлено за N.NN с · окно
+  закроется через 4 с`, the spinner turns green) instead of sliding in again.
 
 No windows on the desktop: both the helper and the main program print **ASCII
 only** to stdout, the human-readable report goes to UTF-8 files
@@ -257,14 +277,41 @@ Build it with `packaging\build-ui.ps1` (Windows) or
 (`forest-ui.exe` / `forest-ui`, ~80 MB — Qt is big, that is expected).
 
 On **Linux** the same helper gives a real tray icon and menu (Qt talks to
-StatusNotifier/**D-Bus**), notifications go through the system service
-(`org.freedesktop.Notifications`) instead of our own window — exactly as before
-for the fallback path, which uses `gdbus`/`notify-send` — and the theme is read
-from the system settings (`gsettings`). There is no window of our own on Linux,
-so the **recovery steps and their millisecond durations are passed in the BODY
-of the system notification**, and the app icon (`forest-proxy-updater.png` — the
-same artwork) is installed into `share/icons/hicolor/256x256/apps` and named in
-the `.desktop` file (`Icon=forest-proxy-updater`).
+StatusNotifier/**D-Bus**) and **draws the SAME notification card as on Windows**:
+it is visible even without a notification service.
+
+**Honest note about the menu on Linux.** The tray menu is our own window
+(`src/ui_menu.py`, Qt.Popup, the card's style, animation), so it applies where
+**we draw the menu**. When the tray goes through the system protocol
+(StatusNotifier/AppIndicator, which `QSystemTrayIcon` sits on), the context menu
+is drawn by the **desktop panel** (KDE Plasma, GNOME, XFCE): its fonts, paddings,
+corner radii and animation — our style cannot apply there, exactly as with the
+notification card, where Linux keeps the system notification. Our menu look
+(colors, radii, row highlight, the 3 px lift, submenu slide-out) works on Windows
+and wherever we draw the menu ourselves. Our own (non-system-protocol) path is
+the same code on Linux (`src/ui_style.py` + `src/ui_menu.py`), but it could not be
+checked on a live Linux desktop in this build (see "Verification limits").
+
+If there is no graphical
+session or the card cannot be shown (window failure), the fallback kicks in — a
+system notification through `org.freedesktop.Notifications`, where the
+**recovery steps and their millisecond durations are passed in the BODY**; the
+Qt-free fallback uses `gdbus`/`notify-send`. The fallback can be forced with
+`notify.card_on_linux: false`. The theme is read from the system settings
+(`gsettings`), and the app icon (`forest-proxy-updater.png` — the same artwork) is
+installed into `share/icons/hicolor/256x256/apps` and named in the `.desktop` file
+(`Icon=forest-proxy-updater`).
+
+The Linux packages declare the system libraries Qt needs (`libxkbcommon-x11-0`,
+`libxcb-cursor0`, `libxcb-icccm4`, `libxcb-image0`, `libxcb-keysyms1`,
+`libxcb-render-util0`, `libxcb-shape0`, `libxcb-xkb1`, `libgl1`, `libegl1` in the
+`.deb`; the same libraries by SONAME in the `.rpm`; `libxkbcommon-x11`,
+`xcb-util-cursor`, `xcb-util-wm`, `xcb-util-image`, `xcb-util-keysyms`,
+`xcb-util-renderutil`, `libxcb` on Arch) — without them the Qt platform plugin
+does not load and the helper does not start. The platform plugins themselves
+(`xcb`, `wayland`) and the Qt libraries are **inside the bundle**. Where exactly
+the packages were tested is stated in the package descriptions and in the docs
+(see “Testing scope”).
 
 ### “Filters” in the menu
 

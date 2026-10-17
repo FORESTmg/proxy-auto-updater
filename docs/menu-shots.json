@@ -1,0 +1,313 @@
+{
+ "dump": "      состояние связи: связь OK  (только показ)\n  ---\n  [v] Поднимать программу автоматически\n  [v] Уведомления\n  Фильтры  [подменю]\n    * РФ — напрямую — включено\n    * Cloudflare — обход — включено\n  Тема оформления  [подменю]\n    * как в системе\n      светлая\n      тёмная\n  ---\n      Выключить прокси вручную\n      Обновить серверы сейчас\n  ---\n      Открыть статус\n      Открыть лог\n  ---\n      Проверить уведомление\n      Сведения\n      Выход (остановить программу)",
+ "screens": [
+  {
+   "name": "Mi Monitor",
+   "geometry": [
+    0,
+    0,
+    2560,
+    1440
+   ],
+   "available": [
+    0,
+    0,
+    2560,
+    1392
+   ],
+   "dpr": 1.0,
+   "refresh_hz": 200.0,
+   "logical_dpi": 96.0,
+   "primary": true
+  },
+  {
+   "name": "LG HDR 4K",
+   "geometry": [
+    2560,
+    0,
+    2560,
+    1440
+   ],
+   "available": [
+    2560,
+    0,
+    2560,
+    1392
+   ],
+   "dpr": 1.5,
+   "refresh_hz": 60.0,
+   "logical_dpi": 96.0,
+   "primary": false
+  }
+ ],
+ "platform": "windows",
+ "fonts": [
+  "+Romic",
+  "a_MachinaOrtoSht",
+  "a_Romanus",
+  "Albertus Nova",
+  "Anime Ace v02",
+  "Arial",
+  "Avante Int",
+  "Bahnschrift"
+ ],
+ "shots": [
+  {
+   "file": "menu-dark-plain.png",
+   "theme": "dark",
+   "hover": null,
+   "panel_w": 269,
+   "panel_h": 487,
+   "row_w": 236,
+   "row_h": 34,
+   "radius": 12,
+   "stripe": 3,
+   "pad": [
+    13,
+    15,
+    12,
+    14
+   ],
+   "font_px": 12,
+   "bg_pixel": [
+    26,
+    27,
+    31,
+    245
+   ],
+   "expected_bg": [
+    26,
+    27,
+    31,
+    245
+   ]
+  },
+  {
+   "file": "menu-dark-hover.png",
+   "theme": "dark",
+   "hover": "notify",
+   "panel_w": 269,
+   "panel_h": 487,
+   "row_w": 236,
+   "row_h": 34,
+   "radius": 12,
+   "stripe": 3,
+   "pad": [
+    13,
+    15,
+    12,
+    14
+   ],
+   "font_px": 12,
+   "bg_pixel": [
+    26,
+    27,
+    31,
+    245
+   ],
+   "expected_bg": [
+    26,
+    27,
+    31,
+    245
+   ]
+  },
+  {
+   "file": "menu-dark-hover-sub.png",
+   "theme": "dark",
+   "hover": "filters",
+   "panel_w": 269,
+   "panel_h": 487,
+   "row_w": 236,
+   "row_h": 34,
+   "radius": 12,
+   "stripe": 3,
+   "pad": [
+    13,
+    15,
+    12,
+    14
+   ],
+   "font_px": 12,
+   "bg_pixel": [
+    26,
+    27,
+    31,
+    245
+   ],
+   "expected_bg": [
+    26,
+    27,
+    31,
+    245
+   ]
+  },
+  {
+   "file": "menu-light-plain.png",
+   "theme": "light",
+   "hover": null,
+   "panel_w": 269,
+   "panel_h": 487,
+   "row_w": 236,
+   "row_h": 34,
+   "radius": 12,
+   "stripe": 3,
+   "pad": [
+    13,
+    15,
+    12,
+    14
+   ],
+   "font_px": 12,
+   "bg_pixel": [
+    250,
+    250,
+    250,
+    245
+   ],
+   "expected_bg": [
+    250,
+    250,
+    250,
+    245
+   ]
+  },
+  {
+   "file": "menu-light-hover.png",
+   "theme": "light",
+   "hover": "notify",
+   "panel_w": 269,
+   "panel_h": 487,
+   "row_w": 236,
+   "row_h": 34,
+   "radius": 12,
+   "stripe": 3,
+   "pad": [
+    13,
+    15,
+    12,
+    14
+   ],
+   "font_px": 12,
+   "bg_pixel": [
+    250,
+    250,
+    250,
+    245
+   ],
+   "expected_bg": [
+    250,
+    250,
+    250,
+    245
+   ]
+  },
+  {
+   "file": "menu-light-hover-sub.png",
+   "theme": "light",
+   "hover": "filters",
+   "panel_w": 269,
+   "panel_h": 487,
+   "row_w": 236,
+   "row_h": 34,
+   "radius": 12,
+   "stripe": 3,
+   "pad": [
+    13,
+    15,
+    12,
+    14
+   ],
+   "font_px": 12,
+   "bg_pixel": [
+    250,
+    250,
+    250,
+    245
+   ],
+   "expected_bg": [
+    250,
+    250,
+    250,
+    245
+   ]
+  }
+ ],
+ "pixels": {
+  "dark": {
+   "menu_bg": [
+    26,
+    27,
+    31,
+    245
+   ],
+   "card_bg": [
+    26,
+    27,
+    31,
+    245
+   ],
+   "equal": true,
+   "tokens": [
+    26,
+    27,
+    31,
+    245
+   ]
+  },
+  "light": {
+   "menu_bg": [
+    250,
+    250,
+    250,
+    245
+   ],
+   "card_bg": [
+    250,
+    250,
+    250,
+    245
+   ],
+   "equal": true,
+   "tokens": [
+    250,
+    250,
+    250,
+    245
+   ]
+  }
+ },
+ "scaled": [
+  {
+   "file": "menu-dark-plain-150.png",
+   "dpr": 1.5,
+   "theme": "dark",
+   "device_size": [
+    446,
+    772
+   ],
+   "panel_device": [
+    403.5,
+    730.5
+   ],
+   "stripe_device": 4.5,
+   "row_device": 51.0
+  },
+  {
+   "file": "menu-light-plain-150.png",
+   "dpr": 1.5,
+   "theme": "light",
+   "device_size": [
+    446,
+    772
+   ],
+   "panel_device": [
+    403.5,
+    730.5
+   ],
+   "stripe_device": 4.5,
+   "row_device": 51.0
+  }
+ ],
+ "card_w": 392
+}

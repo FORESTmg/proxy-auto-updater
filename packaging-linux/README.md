@@ -49,7 +49,7 @@ sh packaging-linux/build-tar.sh            # только .tar.gz
 ```
 
 Версия задаётся переменной окружения: `FOREST_PKG_VERSION=1.0.2 sh build-deb.sh`
-(по умолчанию — та, что в `lib/common.sh`, сейчас `1.1.0`; номер выпуска пакета —
+(по умолчанию — та, что в `lib/common.sh`, сейчас `1.3.0`; номер выпуска пакета —
 `FOREST_PKG_RELEASE`). Каталоги вывода/сборки переопределяются `FOREST_OUT_DIR` и
 `FOREST_WORK_DIR`.
 
@@ -138,11 +138,11 @@ http://127.0.0.1:11808 … generate_204` → `204`) → удаление и пр
 `linux/tests/README.md`, результаты прогонов — `docs/LINUX-PACKAGES-PROOF.ru.md`.
 
 ```sh
-sh linux/tests/wsl-matrix.sh --distro Debian   --package packaging-linux/out/forest-proxy-updater_1.1.0_amd64.deb
-sh linux/tests/wsl-matrix.sh --distro openSUSE-Tumbleweed --package packaging-linux/out/forest-proxy-updater-1.1.0-1.x86_64.rpm
-sh linux/tests/wsl-matrix.sh --distro archlinux --package packaging-linux/out/forest-proxy-updater-1.1.0-1-x86_64.pkg.tar.zst
-sh linux/tests/wsl-matrix.sh --distro Ubuntu --package packaging-linux/out/ForestProxyUpdater-1.1.0-x86_64.AppImage --as-user tester
-sh linux/tests/wsl-matrix.sh --distro Ubuntu --package packaging-linux/out/forest-proxy-updater-1.1.0-linux-x86_64.tar.gz
+sh linux/tests/wsl-matrix.sh --distro Debian   --package packaging-linux/out/forest-proxy-updater_1.3.0_amd64.deb
+sh linux/tests/wsl-matrix.sh --distro openSUSE-Tumbleweed --package packaging-linux/out/forest-proxy-updater-1.3.0-1.x86_64.rpm
+sh linux/tests/wsl-matrix.sh --distro archlinux --package packaging-linux/out/forest-proxy-updater-1.3.0-1-x86_64.pkg.tar.zst
+sh linux/tests/wsl-matrix.sh --distro Ubuntu --package packaging-linux/out/ForestProxyUpdater-1.3.0-x86_64.AppImage --as-user tester
+sh linux/tests/wsl-matrix.sh --distro Ubuntu --package packaging-linux/out/forest-proxy-updater-1.3.0-linux-x86_64.tar.gz
 ```
 
 ## Грабли, уже учтённые в сборщиках

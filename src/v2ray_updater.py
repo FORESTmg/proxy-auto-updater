@@ -57,14 +57,28 @@ import log
 APP_RUN_VALUE = "ForestProxyUpdater"
 
 
+# Запись оригинального (юникодного) текста отчёта: включается на время --status.
+# Определена ДО :func:`_say` — её читает первая же печать.
+_REPORT = None
+
+
 def _say(text="") -> None:
     """Печать в stdout через безопасный слой (см. src/safestdio.py).
 
     Оконная сборка не имеет консоли, а её «кодировка» на Windows — cp1251:
     печать символа вне cp1251 давала UnicodeEncodeError и МОДАЛЬНОЕ ОКНО
     PyInstaller на рабочем столе. Никакая печать здесь упасть не может.
+
+    Побочный эффект: :func:`safestdio.say` заменяет не-ASCII на ``?``. Поэтому
+    рядом ведётся ЗАПИСЬ оригинальных строк (:data:`_REPORT`) — из неё пишется
+    UTF-8-отчёт ``state/status.txt`` (иначе кириллица попадала в файл как «?»).
     """
     SD.say(text)
+    if _REPORT is not None:
+        try:
+            _REPORT.append(str(text))
+        except Exception:
+            pass
 
 
 def _no_window() -> int:
@@ -1335,8 +1349,19 @@ def show_status(cfg: dict) -> int:
             except Exception:
                 pass
 
-    with contextlib.redirect_stdout(_Tee()):
-        rc = _show_status(cfg)
+    # ЗАПИСЬ ОРИГИНАЛЬНОГО ТЕКСТА: _say кладёт строки сюда ДО замены не-ASCII на
+    # «?» (см. safestdio.say), поэтому отчёт в файле — настоящая кириллица.
+    global _REPORT
+    _REPORT = []
+    try:
+        with contextlib.redirect_stdout(_Tee()):
+            rc = _show_status(cfg)
+        lines = list(_REPORT)
+    finally:
+        _REPORT = None
+    text = "\n".join(lines)
+    if not text.strip():
+        text = buf.getvalue()          # запасной путь: только то, что ушло в stdout
     full = ""
     try:
         d = (cfg.get("paths") or {}).get("state_dir") or ""
@@ -1344,7 +1369,7 @@ def show_status(cfg: dict) -> int:
             os.makedirs(d, exist_ok=True)
             full = os.path.join(d, "status.txt")
             with open(full, "w", encoding="utf-8") as f:
-                f.write(buf.getvalue())
+                f.write(text if text.endswith("\n") else text + "\n")
     except Exception:
         full = ""
     # stdout в собранном приложении — ТОЛЬКО ASCII (см. src/safestdio.py),

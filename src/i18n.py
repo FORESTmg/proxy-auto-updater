@@ -278,6 +278,7 @@ _STRINGS = {
     "notify.error.title": {"ru": "Ошибка", "en": "Error"},
     "notify.error.body": {"ru": "Не удалось восстановить связь автоматически.",
                           "en": "Could not restore the connection automatically."},
+    "notify.foot.watching": {"ru": "наблюдение включено", "en": "watchdog is running"},
     "tray.msg.watchdog_on": {"ru": "Надзор включён — программа поднимется сама.",
                              "en": "Supervision on — the program will bring itself back."},
     "tray.msg.watchdog_off": {"ru": "Надзор выключен — после падения запускайте программу вручную.",

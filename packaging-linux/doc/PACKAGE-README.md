@@ -3,11 +3,30 @@
 Короткая шпаргалка для того, кто ставит пакет. Подробно — в `INSTALL.ru.md`
 (русский) и `INSTALL.md` (English) рядом с этим файлом.
 
+## Ограничения проверки
+
+**ОГРАНИЧЕНИЯ ПРОВЕРКИ (RU):** Проверка пакета выполнялась в среде WSL (Linux
+внутри Windows), а не на установленной системе на реальном железе. Меню и
+уведомления в графическом интерфейсе протестированы логически, но НЕ проверены
+на живом рабочем столе — возможны ошибки. Если что-то не работает, сообщите в
+репозитории.
+
+**TESTING SCOPE (EN):** Package testing was performed in WSL (Linux on Windows),
+not on a real installation on bare metal. The GUI menu and notifications are
+tested logically but have NOT been verified on a live desktop — issues are
+possible. If something does not work, please report it in the repository.
+
 ## Что уже внутри
 
 Ядро `xray` и гео-базы (`geoip.dat`, `geosite.dat`) **вшиты внутрь бинарника**,
 скачивать и докладывать больше нечего. Python не нужен: программа несёт свой
-интерпретатор. Зависимостей у пакета нет, кроме `curl` для проверок связи.
+интерпретатор. Зависимостей у пакета нет, кроме `curl` для проверок связи, и
+системных библиотек для помощника интерфейса (Qt6): `libxkbcommon-x11`,
+`xcb-util-cursor`, `xcb-util-wm`, `xcb-util-keysyms`, `xcb-util-image`,
+`xcb-util-renderutil`, `libxcb` (в .deb — `libxkbcommon-x11-0`,
+`libxcb-cursor0`, `libxcb-icccm4`, `libxcb-image0`, `libxcb-keysyms1`,
+`libxcb-render-util0`, `libxcb-shape0`, `libxcb-xkb1`, `libgl1`, `libegl1`).
+Сами плагины платформ Qt (`xcb`, `wayland`) и библиотеки Qt **внутри комплекта**.
 
 ## Раскладка
 

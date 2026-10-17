@@ -3,6 +3,41 @@
 Step-by-step instructions: from a clean system to a working proxy. No windows, no
 dialogs — only a log.
 
+## Testing scope
+
+**TESTING SCOPE (EN):** Package testing was performed in WSL (Linux on Windows),
+not on a real installation on bare metal. The GUI menu and notifications are
+tested logically but have NOT been verified on a live desktop — issues are
+possible. If something does not work, please report it in the repository.
+
+**ОГРАНИЧЕНИЯ ПРОВЕРКИ (RU):** Проверка пакета выполнялась в среде WSL (Linux
+внутри Windows), а не на установленной системе на реальном железе. Меню и
+уведомления в графическом интерфейсе протестированы логически, но НЕ проверены
+на живом рабочем столе — возможны ошибки. Если что-то не работает, сообщите в
+репозитории.
+
+**MENU LOOK ON LINUX (honest).** The tray menu is our own window
+(`src/ui_menu.py`, Qt.Popup, the notification card's style: colors, geometry and
+curves come from the shared `src/ui_style.py`, plus the entrance animation, row
+highlight, checkmarks and submenu slide-out). We draw it ourselves, so when the
+tray works through the **system protocol** (StatusNotifier/AppIndicator, which
+`QSystemTrayIcon` sits on) the context menu is drawn by the **desktop panel** —
+KDE Plasma, GNOME, XFCE: its own fonts, paddings, radii and animation. Our style
+cannot apply there, exactly as with the notification card, where Linux keeps the
+system notification. Our menu look works wherever we draw the menu (Windows and
+our own tray without the system protocol); the code is shared, but it has not been
+verified on a live Linux desktop — only logically.
+
+**ВИД МЕНЮ ТРЕЯ НА LINUX (честно).** Меню трея — своё окно (`src/ui_menu.py`,
+Qt.Popup, стиль карточки: цвета/геометрия/кривые из общего `src/ui_style.py`,
+анимация появления, подсветка строки, галочки, выезд подменю). Рисуем его **мы
+сами**, поэтому при работе через **системный протокол трея**
+(StatusNotifier/AppIndicator) контекстное меню рисует **панель рабочего стола**
+(KDE Plasma, GNOME, XFCE) — свои шрифты, отступы, скругления и своя анимация.
+Наш стиль там примениться не может, как и у карточки уведомления, где на Linux
+остаётся системное уведомление. Наш вид меню действует там, где меню рисуем мы
+(Windows и наш собственный трей без системного протокола).
+
 Contents
 
 * [0. Which package to choose](#0-which-package-to-choose)
@@ -29,11 +64,11 @@ Contents
 
 | Format | Distributions | One-command install | Privileges |
 | --- | --- | --- | --- |
-| `.deb` | Debian, Ubuntu, Mint | `sudo apt install ./forest-proxy-updater_1.1.0_amd64.deb` | root |
-| `.rpm` | Fedora, RHEL, Rocky, Alma, openSUSE | `sudo dnf install ./forest-proxy-updater-1.1.0-1.x86_64.rpm` | root |
-| `.pkg.tar.zst` | Arch, Manjaro, EndeavourOS | `sudo pacman -U ./forest-proxy-updater-1.1.0-1-x86_64.pkg.tar.zst` | root |
-| `.AppImage` | any glibc x86_64 | `chmod +x ForestProxyUpdater-1.1.0-x86_64.AppImage && ./ForestProxyUpdater-1.1.0-x86_64.AppImage --install` | **no root** |
-| `.tar.gz` | any | `tar xzf forest-proxy-updater-1.1.0-linux-x86_64.tar.gz && cd forest-proxy-updater-1.1.0-linux-x86_64 && sudo ./install.sh` | root |
+| `.deb` | Debian, Ubuntu, Mint | `sudo apt install ./forest-proxy-updater_1.3.0_amd64.deb` | root |
+| `.rpm` | Fedora, RHEL, Rocky, Alma, openSUSE | `sudo dnf install ./forest-proxy-updater-1.3.0-1.x86_64.rpm` | root |
+| `.pkg.tar.zst` | Arch, Manjaro, EndeavourOS | `sudo pacman -U ./forest-proxy-updater-1.3.0-1-x86_64.pkg.tar.zst` | root |
+| `.AppImage` | any glibc x86_64 | `chmod +x ForestProxyUpdater-1.3.0-x86_64.AppImage && ./ForestProxyUpdater-1.3.0-x86_64.AppImage --install` | **no root** |
+| `.tar.gz` | any | `tar xzf forest-proxy-updater-1.3.0-linux-x86_64.tar.gz && cd forest-proxy-updater-1.3.0-linux-x86_64 && sudo ./install.sh` | root |
 
 In every case the `xray` core and the geo databases (`geoip.dat`, `geosite.dat`)
 are **already inside the binary** — there is nothing to download or drop in
@@ -70,14 +105,14 @@ curl --version | head -1
 ### 2.1. .deb — Debian, Ubuntu, Linux Mint
 
 ```sh
-sudo apt install ./forest-proxy-updater_1.1.0_amd64.deb
+sudo apt install ./forest-proxy-updater_1.3.0_amd64.deb
 ```
 
 `apt` resolves the `curl` dependency from its configured repositories. If you
 prefer plain `dpkg`:
 
 ```sh
-sudo dpkg -i forest-proxy-updater_1.1.0_amd64.deb
+sudo dpkg -i forest-proxy-updater_1.3.0_amd64.deb
 sudo apt-get -f install        # pulls in curl if it was missing
 ```
 
@@ -86,20 +121,20 @@ sudo apt-get -f install        # pulls in curl if it was missing
 Fedora / RHEL / Rocky / Alma:
 
 ```sh
-sudo dnf install ./forest-proxy-updater-1.1.0-1.x86_64.rpm
+sudo dnf install ./forest-proxy-updater-1.3.0-1.x86_64.rpm
 ```
 
 openSUSE (the package is not signed, so the check must be waived explicitly):
 
 ```sh
-sudo zypper --no-gpg-checks install ./forest-proxy-updater-1.1.0-1.x86_64.rpm
+sudo zypper --no-gpg-checks install ./forest-proxy-updater-1.3.0-1.x86_64.rpm
 ```
 
 If repositories are unreachable (a machine behind a local proxy, for example) and
 `curl` is already installed, a local file installs offline:
 
 ```sh
-sudo rpm -ivh --nodeps forest-proxy-updater-1.1.0-1.x86_64.rpm
+sudo rpm -ivh --nodeps forest-proxy-updater-1.3.0-1.x86_64.rpm
 ```
 
 ### 2.3. Arch, Manjaro — .pkg.tar.zst and PKGBUILD
@@ -107,7 +142,7 @@ sudo rpm -ivh --nodeps forest-proxy-updater-1.1.0-1.x86_64.rpm
 Ready-made package:
 
 ```sh
-sudo pacman -U forest-proxy-updater-1.1.0-1-x86_64.pkg.tar.zst
+sudo pacman -U forest-proxy-updater-1.3.0-1-x86_64.pkg.tar.zst
 ```
 
 Building from the shipped `PKGBUILD` (in `packaging-linux/arch/PKGBUILD`) — the
@@ -129,8 +164,8 @@ An AppImage is a single file, needs nothing from the system and **does not need
 root**. Per-user install (systemd user units + autostart without a login):
 
 ```sh
-chmod +x ForestProxyUpdater-1.1.0-x86_64.AppImage
-./ForestProxyUpdater-1.1.0-x86_64.AppImage --install
+chmod +x ForestProxyUpdater-1.3.0-x86_64.AppImage
+./ForestProxyUpdater-1.3.0-x86_64.AppImage --install
 ```
 
 What happens: the program copies itself into `~/.local/share/forest-proxy-updater/`,
@@ -143,20 +178,20 @@ If FUSE is unavailable (common in WSL and containers), run it with the extract
 flag:
 
 ```sh
-./ForestProxyUpdater-1.1.0-x86_64.AppImage --appimage-extract-and-run --install
+./ForestProxyUpdater-1.3.0-x86_64.AppImage --appimage-extract-and-run --install
 ```
 
 To run it **without installing** (foreground, no autostart):
 
 ```sh
-./ForestProxyUpdater-1.1.0-x86_64.AppImage --run
+./ForestProxyUpdater-1.3.0-x86_64.AppImage --run
 ```
 
 ### 2.5. Portable .tar.gz — any distribution
 
 ```sh
-tar xzf forest-proxy-updater-1.1.0-linux-x86_64.tar.gz
-cd forest-proxy-updater-1.1.0-linux-x86_64
+tar xzf forest-proxy-updater-1.3.0-linux-x86_64.tar.gz
+cd forest-proxy-updater-1.3.0-linux-x86_64
 sudo ./install.sh
 ```
 
@@ -470,7 +505,7 @@ sh packaging-linux/build-tar.sh          # portable .tar.gz only
 
 Artifacts land in `packaging-linux/out/`. Tool requirements and the layout of the
 build system are described in `packaging-linux/README.md`. The version embedded in
-the packages comes from `FOREST_PKG_VERSION` (default `1.1.0`).
+the packages comes from `FOREST_PKG_VERSION` (default `1.3.0`).
 
 ---
 

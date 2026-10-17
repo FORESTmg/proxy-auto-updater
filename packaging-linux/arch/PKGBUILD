@@ -20,11 +20,33 @@
 pkgname=forest-proxy-updater
 pkgver=1.0.1
 pkgrel=1
-pkgdesc="Auto-updating proxy supervisor built on top of the Xray core (core and geo bases bundled)"
+# Оговорка о проверке (та же формулировка, что в описаниях .deb/.rpm и в
+# сообщении установочного скрипта):
+#   ОГРАНИЧЕНИЯ ПРОВЕРКИ: Проверка пакета выполнялась в среде WSL (Linux внутри Windows), а не на установленной системе на реальном железе. Меню и уведомления в графическом интерфейсе протестированы логически, но НЕ проверены на живом рабочем столе — возможны ошибки. Если что-то не работает, сообщите в репозитории.
+#   TESTING SCOPE: Package testing was performed in WSL (Linux on Windows), not on a real installation on bare metal. The GUI menu and notifications are tested logically but have NOT been verified on a live desktop — issues are possible. If something does not work, please report it in the repository.
+pkgdesc="Auto-updating proxy supervisor built on top of the Xray core (core and geo bases bundled); GUI menu/notifications tested only in WSL, not on a live desktop"
 arch=('x86_64')
-url="https://github.com/Forest-Proxy/forest-proxy-updater"
+url="https://github.com/FORESTmg/proxy-auto-updater"
 license=('GPL-3.0-only')
-depends=('curl')
+# Помощник интерфейса (forest-ui, Qt6) грузит плагин платформы xcb/wayland; сам
+# плагин едет в комплекте, а это — системные библиотеки для него. Имена и
+# sonames проверены по ЖИВЫМ пакетам Arch (`extra`, 17.10.2026): libxcb даёт
+# libxcb-shape.so.0 и libxcb-xkb.so.1, xcb-util-wm — libxcb-icccm.so.4,
+# xcb-util-keysyms — libxcb-keysyms.so.1, xcb-util-image — libxcb-image.so.0,
+# xcb-util-renderutil — libxcb-render-util.so.0, xcb-util-cursor —
+# libxcb-cursor.so.0, libxkbcommon-x11 — libxkbcommon-x11.so.0.
+depends=('curl'
+         'libxkbcommon-x11'
+         'xcb-util-cursor'
+         'xcb-util-wm'
+         'xcb-util-image'
+         'xcb-util-keysyms'
+         'xcb-util-renderutil'
+         'libxcb')
+# libGL/libEGL нужны GL-интеграции xcb (Qt грузит их динамически): без драйвера
+# помощник рисует программно, но с ним — как на обычном рабочем столе.
+optdepends=('libglvnd: GL/EGL для GL-интеграции xcb (иначе программная отрисовка)'
+            'mesa: программный GL-драйвер (llvmpipe) для машин без видеодрайвера')
 install=forest-proxy-updater.install
 options=('!strip' '!emptydirs' '!debug')
 

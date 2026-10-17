@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Вид контекстного меню трея — в стиле карточки уведомления (предварительный макет)</title>
+<!--
+  ПРЕДВАРИТЕЛЬНЫЙ МАКЕТ (до внедрения). Самостоятельный файл: открывается в браузере,
+  без интернета и внешних зависимостей.
+
+  Пункты меню — НЕ выдуманы, а взяты дословно из фактического дампа живого помощника:
+      C:\Users\games\AppData\Local\ForestProxyUpdater\state\menu_dump.txt
+  (то, что печатает `forest-ui.exe --menu-dump`, см. docs/WINDOWS-PROOF-1.3.0.ru.md:124).
+
+  Числа вида — НЕ выдуманы: каждый токен помечен источником [файл:строка].
+  Источники:
+    MAK = docs/notify-mockup.html          (утверждённый макет карточки)
+    CARD= src/forest_ui.py, блок «уведомление» (строки 267-319)
+    TH  = src/theme.py, PALETTES            (палитры тем приложения)
+  Полная таблица «элемент -> значение -> откуда» — в конце файла и в отчёте.
+  Анимируются ТОЛЬКО opacity и transform (композитор, без мерцания), 60 кадров/с.
+-->
+<style>
+  /* ══════════ ТОКЕНЫ: тёмная тема (основная) ══════════
+     Цвета карточки — дословно из макета docs/notify-mockup.html:8-10
+     и из src/forest_ui.py:289-303 (NT_C / NT_STATE).                      */
+  :root{
+    --ok:#41c26d;   --err:#dc4f55;  --busy:#e5bf37;  --off:#9497a0;  /* MAK:8 */
+    --card:rgba(26,27,31,.96);        /* MAK:9  --card   (CARD:290) */
+    --card2:rgba(38,40,46,.96);       /* MAK:9  --card2  (CARD:291) — поверхность/подсветка */
+    --txt:#f2f3f5;                    /* MAK:10 --txt    (CARD:292) */
+    --muted:#a2a6b0;                  /* MAK:10 --muted  (CARD:293) */
+    --cur:#e8eaee;                    /* MAK:64 .step.cur .nm (CARD:296) */
+    --foot:#8b909a;                   /* MAK:74 .foot    (CARD:297) */
+    --line:rgba(255,255,255,.10);     /* MAK:29 border    (CARD:294) */
+    --mk:rgba(255,255,255,.22);       /* MAK:60 .mk border (CARD:300) */
+    --tick:#1a1b1f;                   /* MAK:9  --card без альфы — «вырез» галочки */
+    --shadow:0 18px 45px rgba(0,0,0,.55);                       /* MAK:30 box-shadow */
+    --desk:linear-gradient(135deg,#1b2430,#0f1216 60%,#151a1f); /* MAK:15 фон стенда */
+    --hint:#6b7280;                                             /* MAK:20 */
+    /* геометрия — src/forest_ui.py:267-288 */
+    --radius:12px;      /* NT_RADIUS (CARD:268) = border-radius:12px (MAK:30) */
+    --stripe:3px;       /* NT_B_L   (CARD:269) = border-left:3px (MAK:29) */
+    --hairline:1px;     /* NT_B     (CARD:270) */
+    --pad-t:13px;       /* NT_PAD_T (CARD:271) */
+    --pad-r:15px;       /* NT_PAD_R (CARD:271) */
+    --pad-b:12px;       /* NT_PAD_B (CARD:271) */
+    --pad-l:14px;       /* NT_PAD_L (CARD:271) */
+    --row:34px;         /* NT_ICO   (CARD:272) — высота строки = квадрат значка карточки */
+    --row-r:9px;        /* NT_ICO_R (CARD:273) — скругление подсветки */
+    --gap:11px;         /* NT_GAP   (CARD:275) — зазор «галочка|подпись» */
+    --mk-s:13px;        /* NT_MK    (CARD:279) — размер кружка-маркера */
+    --sep-m:6px;        /* NT_STEP_GAP (CARD:280) — отступы разделителя 6px */
+    --inset:6px;        /* NT_STEP_GAP (CARD:280) — врезка подсветки от краёв панели */
+    --fs:12px;          /* NT_FONT["step"] (CARD:288) — размер шрифта пункта 12px */
+    --lift:3px;         /* STEP_RISE_PX (CARD:318) = .step{translateY(3px)} (MAK:58) */
+    /* анимация — src/forest_ui.py:310-319 */
+    --t-in:340ms;       /* ANIM_IN_MS  (CARD:310) = slidein 340ms (MAK:33) */
+    --t-out:260ms;      /* ANIM_OUT_MS (CARD:311) = slideout 260ms (MAK:34) */
+    --t-step:180ms;     /* STEP_FADE_MS (CARD:317) = .step{transition:…180ms} (MAK:58) */
+    --slide:420px;      /* SLIDE_PX (CARD:312) = translateX(420px) (MAK:35) */
+    --cb-in:cubic-bezier(.16,.84,.28,1);  /* CB_IN  (CARD:313) = MAK:33 */
+    --cb-out:cubic-bezier(.42,0,1,1);     /* CB_OUT (CARD:314) = ease-in, MAK:34 */
+    --font:-apple-system,"Segoe UI",Roboto,Arial,sans-serif;      /* MAK:16 */
+  }
+  /* ══════════ СВЕТЛАЯ ТЕМА: цвета из src/theme.py:45-58 ══════════
+     (у карточки в коде сейчас только тёмная палитра NT_C; светлые токены
+      приложения живут в theme.py — их и берём, чтобы меню умело обе темы) */
+  body.light{
+    --card:rgba(250,250,250,.96);     /* TH:46 card_bg  (250,250,250) */
+    --card2:rgba(237,237,237,.96);    /* выведено: фон −13 (в тёмной поверхность = фон +13) */
+    --txt:#181a1c;                    /* TH:49 title   (24,26,28) */
+    --muted:#464a4e;                  /* TH:50 body    (70,74,78) */
+    --cur:#181a1c;                    /* роль .step.cur в светлой = title */
+    --foot:#6c6e74;                   /* TH:53 state_off (108,110,116) — приглушённый */
+    --line:rgba(0,0,0,.10);           /* зеркало --line */
+    --mk:rgba(0,0,0,.22);             /* зеркало --mk */
+    --tick:#fafafa;                   /* «вырез» галочки = фон панели */
+    --shadow:0 18px 45px rgba(0,0,0,.28);
+    --ok:#188038; --err:#c12221; --busy:#b07a00; --off:#6c6e74;  /* TH:52-55 */
+    --desk:linear-gradient(135deg,#eef2f7,#e2e6ea 60%,#dde1e6);  /* фон стенда (не токен интерфейса) */
+    --hint:#8a929c;
+  }
+
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{background:var(--desk);font-family:var(--font);color:var(--txt);padding:16px 18px 22px}
+  h1{font-size:14.5px;font-weight:600;margin:0 0 2px}
+  .sub{font-size:11.5px;color:var(--hint);margin:0 0 12px}
+
+  /* ── панель управления показом ── */
+  .bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 12px}
+  button{font-family:var(--font);font-size:12px;color:var(--txt);cursor:pointer;
+         background:var(--card2);border:1px solid var(--line);border-radius:9px;padding:7px 12px}
+  button:active{transform:scale(.97)}      /* только transform */
+  .cap{font-size:11.5px;color:var(--hint);min-height:16px;flex:1 1 320px}
+  .fps{font-variant-numeric:tabular-nums;font-size:11.5px;color:var(--hint)}
+
+  /* ── стенд: «рабочий стол» + панель задач ── */
+  .stage{position:relative;width:900px;height:620px;border-radius:10px;overflow:hidden;
+         background:var(--desk);border:1px solid var(--line)}
+  .desktop-hint{position:absolute;left:12px;top:10px;font-size:11px;color:var(--hint);letter-spacing:.3px}
+  .taskbar{position:absolute;left:0;right:0;bottom:0;height:42px;background:rgba(0,0,0,.28);
+           border-top:1px solid var(--line);display:flex;align-items:center;gap:10px;padding:0 12px}
+  .taskbar .spacer{width:280px}
+  .taskbar .clock{margin-left:auto;font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+  /* значок трея (демонстрационный, не элемент меню) */
+  .trayico{width:24px;height:24px;border-radius:6px;background:var(--card2);border:1px solid var(--line);
+           display:flex;align-items:center;justify-content:center;position:relative}
+  .trayico svg{width:15px;height:15px;color:var(--muted)}
+  .trayico .dot{position:absolute;right:-3px;bottom:-3px;width:10px;height:10px;border-radius:50%;
+                border:2px solid var(--card);background:var(--ok)}
+  .tb-hint{font-size:10.5px;color:var(--hint)}
+
+  /* ── КУРСОР (двигается только transform) ── */
+  #cursor{position:absolute;left:0;top:0;width:16px;height:22px;pointer-events:none;z-index:9;
+          transform:translate(40px,40px);transition:transform 420ms var(--cb-in);
+          will-change:transform}
+  #cursor svg{display:block;filter:drop-shadow(0 2px 3px rgba(0,0,0,.5))}
+  #ripple{position:absolute;left:0;top:0;width:26px;height:26px;margin:-13px 0 0 -13px;border-radius:50%;
+          border:2px solid var(--ok);opacity:0;pointer-events:none;z-index:8;
+          transition:transform 300ms ease-out,opacity 300ms ease-out;will-change:transform,opacity}
+
+  /* ══════════ ПАНЕЛЬ МЕНЮ — 1:1 с карточкой уведомления ══════════ */
+  .panel{position:absolute;width:max-content;background:var(--card);
+         border:var(--hairline) solid var(--line);border-left:var(--stripe) solid var(--ok);
+         border-radius:var(--radius);box-shadow:var(--shadow);backdrop-filter:blur(6px);
+         padding:var(--pad-t) var(--pad-r) var(--pad-b) var(--pad-l);
+         /* ПОЯВЛЕНИЕ/ЗАКРЫТИЕ и ПОДЪЕМ ПОДМЕНЮ: сдвиг + прозрачность, как у карточки */
+         transform:translateX(var(--slide));opacity:0;
+         transition:transform var(--t-in) var(--cb-in),opacity var(--t-in) var(--cb-in);
+         will-change:transform,opacity;z-index:5}
+  .panel.in{transform:translateX(0);opacity:1}
+  .panel.out{transform:translateX(var(--slide));opacity:0;
+             transition:transform var(--t-out) var(--cb-out),opacity var(--t-out) var(--cb-out)}
+
+  /* подсветка — ОДИН слой, который ПЕРЕЕЗЖАЕТ по пунктам (transform), как «текущий этап» карточки */
+  .hl{position:absolute;left:var(--inset);right:var(--inset);top:0;height:var(--row);
+      border-radius:var(--row-r);background:var(--card2);opacity:0;pointer-events:none;
+      transform:translateY(0);transition:transform var(--t-step) ease,opacity var(--t-step) ease;
+      will-change:transform,opacity}
+
+  .row{position:relative;display:flex;align-items:center;gap:var(--gap);height:var(--row);
+       white-space:nowrap}
+  .row .ind{flex:0 0 var(--mk-s);width:var(--mk-s);height:var(--mk-s);position:relative}
+  .row .ind i{position:absolute;inset:0;border-radius:50%}
+  .row .ind .ring{border:1.5px solid var(--mk);opacity:1;transition:opacity var(--t-step) linear}
+  .row .ind .fill{background:var(--ok);opacity:0;transition:opacity var(--t-step) linear}
+  .row .ind .dot{width:6px;height:3px;inset:auto;left:3.5px;top:5px;
+                 border-left:1.5px solid var(--tick);border-bottom:1.5px solid var(--tick);
+                 border-radius:0;transform:rotate(-45deg) scale(.4);opacity:0;
+                 transition:transform var(--t-step) var(--cb-in),opacity var(--t-step) linear}
+  .row.checked .ind .ring{opacity:0}
+  .row.checked .ind .fill{opacity:1}
+  .row.checked .ind .dot{opacity:1;transform:rotate(-45deg) scale(1)}
+  /* пустой индикатор у обычных пунктов не рисуем */
+  .row.noind .ind{visibility:hidden}
+
+  /* подпись: РОВНО ОДИН слой текста. Цвет меняется transition'ом по color.
+     ДВУХ наложенных слоёв и кросс-фейда здесь быть не должно: прежний вариант
+     (.mut в потоке + .cur поверх абсолютом со сдвигом −3 px) рисовал ДВЕ копии
+     текста одновременно — вторая копия видна и в покое наведения, отсюда
+     «двоение». Подъём строки — целыми пикселями (3 px), поэтому глифы остаются
+     резкими: целочисленный сдвиг не смазывает растр. */
+  .row .lbl{position:relative;flex:1 1 auto;line-height:var(--row);
+            color:var(--muted);transform:translateY(0);
+            transition:color var(--t-step) linear,transform var(--t-step) ease;
+            will-change:transform}
+  /* размер шрифта — на вложенном span: так строка набирается с тем же
+     межстрочным «упором», что и раньше (иначе подпись съезжает на 1 px) */
+  .row .lbl .tx{font-size:var(--fs)}
+  .row.on .lbl{color:var(--cur);transform:translateY(calc(-1 * var(--lift)))}
+  .row.dis .lbl{color:var(--foot)}                 /* «только показ» = цвет футера карточки */
+
+  /* шеврон подменю (1.5 px — толщина пера маркера карточки, CARD:1149) */
+  .row .chev{flex:0 0 7px;width:7px;height:7px;position:relative}
+  .row .chev b{position:absolute;left:0;top:0;width:6px;height:6px;transform:rotate(45deg);
+               border-right:1.5px solid var(--muted);border-top:1.5px solid var(--muted)}
+  .row .chev b.br{opacity:0;transition:opacity var(--t-step) linear;
+                  border-color:var(--cur)}
+  .row.on .chev b.br{opacity:1}
+
+  .sep{height:var(--hairline);background:var(--line);margin:var(--sep-m) calc(-1 * var(--pad-r))
+       var(--sep-m) calc(-1 * var(--pad-l))}
+
+  /* подменю встают сбоку от СВОЕЙ строки — место задаёт скрипт (placeSubs) */
+
+  /* мелкая справка */
+  .note{margin:14px 0 0;font-size:10.5px;line-height:1.5;color:var(--hint);max-width:900px}
+  pre.tok{margin:10px 0 0;font-family:ui-monospace,Consolas,monospace;font-size:10.5px;
+          line-height:1.45;color:var(--hint);white-space:pre-wrap;max-width:900px}
+</style>
+</head>
+<body>
+
+<h1>Контекстное меню трея — в стиле карточки уведомления</h1>
+<p class="sub">Предварительный макет. Пункты — дословно из живого дампа меню; цвета, геометрия и кривые —
+из <code>docs/notify-mockup.html</code> и блока «уведомление» в <code>src/forest_ui.py</code>. Анимируются только
+<code>opacity</code> и <code>transform</code>.</p>
+
+<div class="bar">
+  <button id="btnLoop">Повторить анимацию</button>
+  <button id="btnTheme">Тема: тёмная</button>
+  <span class="fps" id="fps">кадров/с: —</span>
+  <span class="cap" id="cap">…</span>
+</div>
+
+<div class="stage">
+  <div class="desktop-hint">Стенд: меню открывается у значка трея · появление 340 мс · подсветка 180 мс · закрытие 260 мс</div>
+
+  <!-- панель задач со значком трея (демонстрационная) -->
+  <div class="taskbar">
+    <div class="spacer"></div>
+    <div class="trayico" id="tray" title="значок трея (демонстрационный)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+        <path d="M12 3l7 3.5v5.2c0 4.3-2.9 7.8-7 9.3-4.1-1.5-7-5-7-9.3V6.5L12 3z"/>
+      </svg>
+      <span class="dot"></span>
+    </div>
+    <span class="tb-hint">правая кнопка по значку</span>
+    <span class="clock">23:08</span>
+  </div>
+
+  <div id="ripple"></div>
+  <div id="cursor">
+    <svg width="16" height="22" viewBox="0 0 16 22">
+      <path d="M1 1l0 16 4-4.2 2.6 5.4 3-1.4-2.6-5.3H13z" fill="#f2f3f5" stroke="#12141a" stroke-width="1.1"/>
+    </svg>
+  </div>
+
+  <!-- корневое меню: DOM собирается скриптом из данных (список = дамп меню) -->
+  <div class="panel" id="menu"><div class="hl" id="hlMenu"></div></div>
+  <div class="panel" id="subF"><div class="hl" id="hlF"></div></div>
+  <div class="panel" id="subT"><div class="hl" id="hlT"></div></div>
+</div>
+
+<div class="note">
+  <b>Это предварительный макет, а не готовая программа.</b> Показано, как будет выглядеть и вести себя
+  контекстное меню трея после правки: своё всплывающее окно вместо системного <code>QMenu</code>, потому что
+  <code>QMenu</code> не умеет анимацию. Реализация в коде (<code>src/forest_ui.py</code>, общий модуль стиля,
+  пересборка и обновление живой установки) начинается только после того, как макет одобрен.
+  <br>
+  <b>Пункты</b> — ровно как в живом дампе <code>state/menu_dump.txt</code> (печатает
+  <code>forest-ui.exe --menu-dump</code>): ничего не пропущено и не переименовано. Галочки соответствуют дампу:
+  «Поднимать программу автоматически» — вкл, «Уведомления» — вкл, «РФ — напрямую» — включено,
+  «Cloudflare — обход» — включено, «Тема оформления» — «как в системе». Строка состояния сверху — пункт
+  «только показ» (в дампе помечен так же).
+  <br>
+  <b>Linux:</b> при работе через системный протокол трея (StatusNotifier/AppIndicator — <code>QSystemTrayIcon</code>
+  поверх него) контекстное меню рисует <b>панель рабочего стола</b> (KDE Plasma, GNOME, XFCE): свой вид, свои
+  шрифты, отступы и анимация. Наш стиль там примениться не может — как и у карточки уведомления, где на Linux
+  остаётся системное уведомление. Наш вид меню работает там, где меню рисуем мы сами (Windows и наш собственный
+  трей без системного протокола).
+  <br>
+  <b>Стенд:</b> подменю показано справа от меню; на краю экрана, где справа места нет, подменю открывается влево
+  тем же выездом (зеркальный знак сдвига). Позиция меню — по позиции курсора у значка, а не «в углу экрана».
+  <br>
+  <b>Подпись пункта — РОВНО ОДИН слой текста</b> (<code>.row .lbl</code>), цвет меняется
+  <code>transition: color 180ms</code>. Прежний вариант (приглушённый слой в потоке + яркий слой поверх
+  абсолютом со сдвигом −3 px, кросс-фейд по прозрачности) рисовал <b>две копии подписи одновременно</b> —
+  это и было «двоение». Проверка числами: до правки в покое наведения 6436 чернильных пикселей (×1.90 к
+  обычному состоянию), высота подписи 14.75 px вместо 10.75, три полосы чернил; после правки — 3791 px,
+  10.75 px, одна полоса, сдвиг ровно 3 CSS px. Снимки «до/после» — <code>docs/menu-hover-proof.png</code>.
+</div>
+
+<pre class="tok" id="tok"></pre>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════════════
+   ДАННЫЕ. Дословно из дампа живого помощника
+   C:\Users\games\AppData\Local\ForestProxyUpdater\state\menu_dump.txt
+   (печатает `forest-ui.exe --menu-dump`; см. docs/WINDOWS-PROOF-1.3.0.ru.md:124)
+   ═══════════════════════════════════════════════════════════════════════════ */
+const ROOT = [
+  {t:"состояние связи: связь OK", dis:true},                 // дамп:1  (только показ)
+  {sep:true},                                                 // дамп:2
+  {t:"Поднимать программу автоматически", check:true},        // дамп:3  [v]
+  {t:"Уведомления", check:true},                              // дамп:4  [v]
+  {t:"Фильтры", sub:"F"},                                     // дамп:5  подменю
+  {t:"Тема оформления", sub:"T"},                             // дамп:8  подменю
+  {sep:true},                                                 // дамп:12
+  {t:"Выключить прокси вручную"},                             // дамп:13
+  {t:"Обновить серверы сейчас"},                              // дамп:14
+  {sep:true},                                                 // дамп:15
+  {t:"Открыть статус"},                                       // дамп:16
+  {t:"Открыть лог"},                                          // дамп:17
+  {sep:true},                                                 // дамп:18
+  {t:"Проверить уведомление"},                                // дамп:19
+  {t:"Сведения"},                                             // дамп:20
+  {t:"Выход (остановить программу)"}                          // дамп:21
+];
+/* подменю «Фильтры»: подпись меняется вместе с галочкой — как в живом меню */
+const FILTERS = [
+  {t:"РФ — напрямую", state:true,  key:"ru"},                 // дамп:6  «— включено»
+  {t:"Cloudflare — обход", state:true, key:"cf"}              // дамп:7  «— включено»
+];
+/* подменю «Тема оформления»: одиночный выбор */
+const THEMES = [
+  {t:"как в системе", state:true,  key:"auto"},               // дамп:9  *
+  {t:"светлая",      state:false, key:"light"},               // дамп:10
+  {t:"тёмная",       state:false, key:"dark"}                 // дамп:11
+];
+
+const $ = id => document.getElementById(id);
+const stage = document.querySelector(".stage");
+const menu = $("menu"), subF = $("subF"), subT = $("subT");
+const cursor = $("cursor"), ripple = $("ripple"), tray = $("tray");
+const panels = {menu, F:subF, T:subT};
+const PAD_T = 13;                       /* = --pad-t (NT_PAD_T, CARD:271) */
+
+/* ── сборка DOM ─────────────────────────────────────────────────────────── */
+function buildRow(d){
+  const row = document.createElement("div");
+  row.className = "row" + (d.dis ? " dis" : "") + (d.check ? " checked" : "")
+                + (d.check ? "" : " noind") + (d.sub ? " sub" : "");
+  if(d.sub) row.dataset.sub = d.sub;
+  row.innerHTML =
+    '<span class="ind"><i class="ring"></i><i class="fill"></i><i class="dot"></i></span>' +
+    '<span class="lbl"><span class="tx"></span></span>' +
+    (d.sub ? '<span class="chev"><b class="mu"></b><b class="br"></b></span>' : '');
+  row.dataset.text = d.t;
+  return row;
+}
+function label(row, text){          // ОДИН слой текста: подпись пишется ровно один раз
+  row.querySelector(".lbl .tx").textContent = text;
+}
+function buildPanel(panel, items){
+  items.forEach(d => {
+    if(d.sep){ const s = document.createElement("div"); s.className = "sep"; panel.appendChild(s); return; }
+    const row = buildRow(d);
+    label(row, d.t);
+    panel.appendChild(row);
+  });
+}
+buildPanel(menu, ROOT); buildPanel(subF, FILTERS); buildPanel(subT, THEMES);
+
+const rowsOf = p => [...p.querySelectorAll(".row")];
+const rowOf = (p, startsWith) => rowsOf(p).find(r => r.dataset.text.startsWith(startsWith));
+const filtersRow = key => rowOf(subF, key === "ru" ? "РФ" : "Cloudflare");
+const themeRow = key => rowOf(subT, key === "auto" ? "как в системе" : key === "light" ? "светлая" : "тёмная");
+
+/* подписи фильтров — как в живом меню: «— включено» / «— выключено» */
+function renderFilters(){
+  FILTERS.forEach(f => label(filtersRow(f.key), f.t + " — " + (f.state ? "включено" : "выключено")));
+}
+renderFilters();
+
+/* ── подсветка: ОДИН слой, переезжает transform'ом ───────────────────────── */
+function hover(panel, row){
+  rowsOf(panel).forEach(r => r.classList.toggle("on", r === row));
+  const hl = panel.querySelector(".hl");
+  if(!row || row.classList.contains("dis")){ hl.style.opacity = 0; return; }   /* «только показ» не подсвечиваем */
+  hl.style.transform = "translateY(" + row.offsetTop + "px)";
+  hl.style.opacity = 1;
+}
+function clearHover(panel){ hover(panel, null); }
+
+/* ── появление/закрытие: сдвиг + прозрачность (только transform/opacity) ── */
+function showPanel(panel){
+  panel.classList.remove("out");
+  void panel.offsetWidth;                    // сброс перехода, чтобы выезд был виден
+  panel.classList.add("in");
+}
+function hidePanel(panel){
+  panel.classList.remove("in");
+  panel.classList.add("out");
+}
+/* мгновенный сброс перед новым кругом: иначе на втором круге меню уже открыто
+   (переход не запускается) и выезд не виден */
+function resetPanels(){
+  [menu, subF, subT].forEach(p => {
+    const keep = p.style.transition;
+    p.style.transition = "none";
+    p.classList.remove("in", "out");
+    void p.offsetWidth;
+    p.style.transition = keep || "";
+  });
+}
+function clickRippleAt(x, y){
+  ripple.style.transition = "none";
+  ripple.style.transform = "translate(" + x + "px," + y + "px) scale(.6)";
+  ripple.style.opacity = ".9";
+  void ripple.offsetWidth;
+  ripple.style.transition = "transform 300ms ease-out,opacity 300ms ease-out";
+  ripple.style.transform = "translate(" + x + "px," + y + "px) scale(1.4)";
+  ripple.style.opacity = "0";
+}
+function moveCursorTo(el, dx, dy){
+  const x = el.offsetLeft + dx, y = el.offsetTop + dy;      // координаты внутри .stage
+  cursor.style.transform = "translate(" + x + "px," + y + "px)";
+  return [x, y];
+}
+const cursorToTray = () => moveCursorTo(tray, 12, 12);       // центр значка трея
+const clickAt = (x, y) => clickRippleAt(x, y);
+
+/* ── место на стенде (меню — у значка трея, как по позиции курсора) ─────── */
+function placeMenu(){
+  const tb = document.querySelector(".taskbar");
+  menu.style.left = Math.max(6, tray.offsetLeft + tray.offsetWidth - menu.offsetWidth + 4) + "px";
+  menu.style.top  = Math.max(6, tb.offsetTop - menu.offsetHeight - 6) + "px";
+}
+/* подменю встают сбоку от СВОЕЙ строки; выезд — тем же входом карточки */
+function placeSubs(){
+  const left = menu.offsetLeft + menu.offsetWidth + 6;
+  [["F", "Фильтры"], ["T", "Тема оформления"]].forEach(([k, name]) => {
+    const r = rowOf(menu, name);
+    panels[k].style.left = left + "px";
+    panels[k].style.top = Math.max(6, menu.offsetTop + r.offsetTop - PAD_T) + "px";
+  });
+}
+
+/* ── состояние демонстрации ─────────────────────────────────────────────── */
+let light = false, timers = [];
+
+function setTheme(isLight){
+  light = !!isLight;
+  document.body.classList.toggle("light", light);
+  $("btnTheme").textContent = "Тема: " + (light ? "светлая" : "тёмная");
+}
+function toggleFilter(key){                    // клик по переключателю: галочка анимированно меняется
+  const f = FILTERS.find(x => x.key === key);
+  f.state = !f.state;
+  filtersRow(key).classList.toggle("checked", f.state);   // ring/fill/dot — opacity + scale
+  renderFilters();
+  return f.state;
+}
+function selectTheme(key){
+  THEMES.forEach(x => { x.state = (x.key === key); themeRow(x.key).classList.toggle("checked", x.state); });
+  setTheme(key === "light");                   // «как в системе» в макете = тёмная (системная тема не определяется)
+}
+
+/* ── СЦЕНАРИЙ: появление, перемещение подсветки, галочка, подменю, закрытие ── */
+const SCENARIO = [
+  {at:0.10, cap:"Исходное состояние: курсор у значка трея, меню закрыто", fn(){
+    resetPanels(); cursorToTray();
+    clearHover(menu); clearHover(subF); clearHover(subT);
+  }},
+  {at:0.60, cap:"Правый клик по значку трея → меню выезжает: сдвиг 420 px + прозрачность, 340 мс, cubic-bezier(.16,.84,.28,1)", fn(){
+    placeMenu(); showPanel(menu); placeSubs();
+  }},
+  {at:1.25, cap:"Курсор идёт к пункту «Поднимать программу автоматически» → подсветка плавно доезжает (transform 180 мс, подъём строки 3 px)", fn(){
+    const r = rowOf(menu, "Поднимать"); const [x,y] = moveCursorTo(menu, r.offsetLeft + 6, r.offsetTop + 17);
+    setTimeout(() => { hover(menu, r); clickAt(x, y); }, 380);
+  }},
+  {at:2.30, cap:"Подсветка едет вниз по списку: «Уведомления»", fn(){
+    const r = rowOf(menu, "Уведомления"); moveCursorTo(menu, r.offsetLeft + 6, r.offsetTop + 17);
+    setTimeout(() => hover(menu, r), 320);
+  }},
+  {at:3.05, cap:"Пункт «Фильтры»: подменю выезжает тем же входом (сдвиг + прозрачность, 340 мс)", fn(){
+    const r = rowOf(menu, "Фильтры"); moveCursorTo(menu, r.offsetLeft + 6, r.offsetTop + 17);
+    setTimeout(() => { hover(menu, r); placeSubs(); showPanel(subF); }, 320);
+  }},
+  {at:3.95, cap:"Курсор в подменю: подсветка внутри подменю (тот же слой, тот же transform)", fn(){
+    const r = filtersRow("ru"); const [x,y] = moveCursorTo(subF, r.offsetLeft + 6, r.offsetTop + 17);
+    setTimeout(() => { hover(subF, r); clickAt(x, y); }, 380);
+  }},
+  {at:4.85, cap:"Клик по «РФ — напрямую»: галочка анимированно гаснет (opacity + scale, 180 мс), подпись → «— выключено»", fn(){
+    toggleFilter("ru");
+  }},
+  {at:5.75, cap:"Второй клик: галочка анимированно появляется; подпись → «— включено»", fn(){
+    toggleFilter("ru");
+  }},
+  {at:6.55, cap:"Переход к «Тема оформления»: выезд второго подменю, радиогалочка на «как в системе»", fn(){
+    hidePanel(subF); clearHover(subF);
+    const r = rowOf(menu, "Тема оформления"); moveCursorTo(menu, r.offsetLeft + 6, r.offsetTop + 17);
+    setTimeout(() => { hover(menu, r); placeSubs(); showPanel(subT); }, 320);
+  }},
+  {at:7.55, cap:"Выбор «светлая»: радиогалочка переезжает (opacity + scale) и меню показывает СВЕТЛУЮ тему", fn(){
+    const r = themeRow("light"); const [x,y] = moveCursorTo(subT, r.offsetLeft + 6, r.offsetTop + 17);
+    setTimeout(() => { hover(subT, r); clickAt(x, y); }, 380);
+    setTimeout(() => selectTheme("light"), 500);
+  }},
+  {at:8.75, cap:"Esc: закрытие — сдвиг 420 px + прозрачность, 260 мс, ease-in (обе панели)", fn(){
+    hidePanel(subF); hidePanel(subT); hidePanel(menu);
+    clearHover(subF); clearHover(subT); clearHover(menu);
+    setTheme(false);                            // возврат к исходной теме для следующего круга
+    themeRow("auto").classList.add("checked"); themeRow("light").classList.remove("checked");
+    themeRow("dark").classList.remove("checked");
+    THEMES.forEach(x => x.state = (x.key === "auto"));
+  }},
+  {at:9.60, cap:"Готово: меню закрыто, настройки вернулись к состоянию дампа. Кнопка «Повторить анимацию» — заново", fn(){}}
+];
+
+function runScenario(){
+  timers.forEach(clearTimeout); timers = [];
+  SCENARIO.forEach(s => timers.push(setTimeout(() => { $("cap").textContent = s.cap; s.fn(); }, s.at * 1000)));
+  /* по кругу: после последнего шага всё повторяется само */
+  timers.push(setTimeout(runScenario, (SCENARIO[SCENARIO.length - 1].at + 2.4) * 1000));
+}
+
+/* ── счётчик кадров (живое доказательство 60 к/с; ОДИН цикл на страницу) ── */
+let frames = 0, fT0 = performance.now();
+function tick(){
+  frames++;
+  const now = performance.now();
+  if(now - fT0 >= 1000){ $("fps").textContent = "кадров/с: " + Math.round(frames * 1000 / (now - fT0)); frames = 0; fT0 = now; }
+  requestAnimationFrame(tick);
+}
+
+/* ── кнопки ─────────────────────────────────────────────────────────────── */
+$("btnLoop").onclick = () => runScenario();
+$("btnTheme").onclick = () => setTheme(!light);
+[...subT.querySelectorAll(".row")].forEach(r => r.addEventListener("mousedown", () => {
+  selectTheme(r.dataset.text === "как в системе" ? "auto" : r.dataset.text === "светлая" ? "light" : "dark");
+}));
+
+/* ── таблица токенов прямо на странице (чтобы «одинаково» было проверяемо) ── */
+$("tok").textContent =
+"ТОКЕНЫ (проверяемо, не «похоже на глаз»)\n" +
+"  фон панели       --card      rgba(26,27,31,.96)   MAK:9  = NT_C[\"card\"]  CARD:290\n" +
+"  поверхность/подсветка --card2 rgba(38,40,46,.96)  MAK:9  = NT_C[\"card2\"] CARD:291\n" +
+"  заголовочный текст --txt     #f2f3f5              MAK:10 = NT_C[\"txt\"]   CARD:292\n" +
+"  приглушённый текст --muted   #a2a6b0              MAK:10 = NT_C[\"muted\"] CARD:293\n" +
+"  цвет наведённой строки --cur #e8eaee              MAK:64 = NT_C[\"cur\"]   CARD:296\n" +
+"  только-показ / выключенное --foot #8b909a         MAK:74 = NT_C[\"foot\"]  CARD:297\n" +
+"  рамка и разделители --line   rgba(255,255,255,.10) MAK:29 = NT_C[\"line\"] CARD:294\n" +
+"  кружок-маркер (галочка) --mk  rgba(255,255,255,.22) MAK:60 = NT_C[\"mk\"]  CARD:300\n" +
+"  цвет состояния (акцент)   --ok #41c26d            MAK:8  = NT_STATE[\"ok\"] CARD:302\n" +
+"  тень панели       box-shadow 0 18px 45px rgba(0,0,0,.55)   MAK:30\n" +
+"  скругление панели --radius   12 px                MAK:30 = NT_RADIUS      CARD:268\n" +
+"  полоса акцента слева --stripe 3 px                MAK:29 = NT_B_L         CARD:269\n" +
+"  рамка             --hairline 1 px                 MAK:29 = NT_B           CARD:270\n" +
+"  отступы панели    --pad 13/15/12/14 px            MAK:31 = NT_PAD_T/R/B/L CARD:271\n" +
+"  высота строки     --row      34 px                NT_ICO   (квадрат значка) CARD:272\n" +
+"  скругление подсветки --row-r 9 px                 NT_ICO_R                CARD:273\n" +
+"  зазор «маркер|подпись» --gap 11 px                NT_GAP                  CARD:275\n" +
+"  размер маркера/галочки --mk-s 13 px               NT_MK                   CARD:279\n" +
+"  разделитель и врезка подсветки 6 px               NT_STEP_GAP             CARD:280\n" +
+"  отступ слева (3+14)  --indent 17 px               NT_B_L+NT_PAD_L    CARD:269+271\n" +
+"  размер шрифта пункта 12 px                        NT_FONT[\"step\"]         CARD:288\n" +
+"  подъём строки при наведении 3 px                  STEP_RISE_PX            CARD:318\n" +
+"  подпись пункта     ОДИН слой, transition ТОЛЬКО по color (180 мс): двоения\n" +
+"                     нет (было ДВА слоя с кросс-фейдом + сдвиг 3 px)\n" +
+"  появление меню    340 мс cubic-bezier(.16,.84,.28,1)  ANIM_IN_MS/CB_IN   CARD:310,313 (MAK:33)\n" +
+"  закрытие меню     260 мс ease-in cubic-bezier(.42,0,1,1) ANIM_OUT_MS/CB_OUT CARD:311,314 (MAK:34)\n" +
+"  сдвиг при выезде  420 px                          SLIDE_PX                CARD:312\n" +
+"  подсветка/галочка 180 мс                          STEP_FADE_MS            CARD:317\n" +
+"  светлая тема               фон #fafafa, текст #181a1c, приглушённый #464a4e,\n" +
+"                             состояния #188038/#c12221/#b07a00/#6c6e74    TH:45-58\n" +
+"                             (TH = src/theme.py, PALETTES[\"light\"])\n" +
+"  шрифт                      -apple-system,\"Segoe UI\",Roboto,Arial   MAK:16\n" +
+"  радиус кнопок стенда       9 px = NT_ICO_R (только стенд, не меню)\n";
+
+setTheme(false);
+runScenario();
+tick();                                   // счётчик кадров — один цикл на всю страницу
+</script>
+</body>
+</html>

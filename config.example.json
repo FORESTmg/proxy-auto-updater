@@ -13,7 +13,7 @@
     "corner": "bottom-right",
     "on_server_switch": true,
     "show_on_manual_off": true,
-    "width": 360
+    "width": 392
   },
   "client": {
     "mode": "standalone",
@@ -138,6 +138,7 @@
     "check_interval_s": 10,
     "probe_timeout_s": 4,
     "max_strikes": 3,
+    "notify_min_gap_ms": 250,
     "hotcache_n": 20,
     "hotcache_ttl_s": 3600,
     "speed_min_kbps": 1500,

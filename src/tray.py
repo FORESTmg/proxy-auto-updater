@@ -44,6 +44,43 @@ import tray_menu as TM
 
 IS_WIN = sys.platform == "win32"
 
+
+def _notify_details(cfg: dict, ev: str) -> tuple:
+    """Этапы с временами и итоговая строка для уведомления (запасной путь).
+
+    Берём из состояния сторожа (``state/tray_status.json``): список этапов
+    процесса С ВРЕМЕНЕМ КАЖДОГО В МИЛЛИСЕКУНДАХ и время восстановления связи.
+    Без этого запасной путь (без Qt) показывал только текст события — а
+    пользователь просил тот же состав, что и в карточке помощника.
+    -> (список строк этапов, строка футера)
+    """
+    try:
+        import status_info as SI
+        import tray_status as TS
+        st = TS.read_status(cfg) or {}
+    except Exception:
+        return ([], "")
+    proc = st.get("proc") or {}
+    if not proc or str(proc.get("id") or "") == "":
+        # процесса нет — показываем время восстановления, если оно известно
+        if ev in ("restored", "on"):
+            txt = SI.recovery_text(st)
+            return ([], txt)
+        return ([], "")
+    n = SI.notif(proc)
+    lines = []
+    for s in SI.steps_data(proc):
+        mark = "✗" if s["failed"] else ("✓" if s["done"] else "·")
+        lines.append(f"{mark} {s['nm']}   {s['ms']} мс")
+    if n["failed"]:
+        foot = n["footer"]
+    elif n["final"]:
+        foot = SI.recovery_ms_text(proc) + " · окно закроется через 4 с"
+    else:
+        foot = n["footer"]
+    return (lines, foot)
+
+
 # ─────────────────────────────────────────────────────── константы Win32 ───
 WM_DESTROY = 0x0002
 WM_COMMAND = 0x0111
@@ -292,9 +329,12 @@ class _TrayHost:
             pass
         try:
             import notify as N
-            N.notify_event(ev, getattr(self.actions, "cfg", None))
+            steps, foot = _notify_details(getattr(self.actions, "cfg", None) or {},
+                                          ev)
+            N.notify_event(ev, getattr(self.actions, "cfg", None),
+                           steps=steps, footer=foot)
             self.lg.info(f"{self.tag}: уведомление о событии «{ev}» "
-                         f"({prev} -> {cur})")
+                         f"({prev} -> {cur}); этапов: {len(steps)}")
         except Exception as e:
             self.lg.warn(f"{self.tag}: уведомление ({ev}): {e}")
 

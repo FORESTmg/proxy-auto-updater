@@ -122,7 +122,8 @@ DEFAULTS = {
     "corner": "bottom-right",
     "on_server_switch": True,
     "show_on_manual_off": True,
-    "width": 360,
+    "width": 392,                # ширина карточки — как в макете (и у помощника)
+    "card_on_linux": True,       # на Linux рисуем ТУ ЖЕ карточку (откат — D-Bus)
 }
 
 _lock = threading.RLock()
@@ -391,7 +392,7 @@ _dib_w = 0
 
 
 def _render_card(w: int, h: int, dpi: float, kind: str, title: str, body: str,
-                 pal: dict):
+                 pal: dict, steps=None, footer: str = ""):
     """Рисует карточку в свежий DIB. -> (hbitmap, hdc_mem, old_bitmap, buf_ref)"""
     global _dib_w
     bmi = BITMAPINFO()
@@ -435,9 +436,25 @@ def _render_card(w: int, h: int, dpi: float, kind: str, title: str, body: str,
     text_w = w - text_x - pad
     title_h = draw_text(hdc, title, text_x, pad, text_w, dpi, True,
                         pal.get("title", TITLE_RGB))
+    y = pad + title_h
     if body:
-        draw_text(hdc, body, text_x, pad + title_h + int(4 * dpi), text_w, dpi,
-                  False, pal.get("body", BODY_RGB))
+        y += int(4 * dpi)
+        y += draw_text(hdc, body, text_x, y, text_w, dpi, False,
+                       pal.get("body", BODY_RGB))
+    # ЭТАПЫ С ВРЕМЕНАМИ (запасной путь без Qt): та же строка, что в карточке
+    # помощника — «✓ имя   NNN мс», но нарисованная GDI-текстом.
+    lines = [str(x) for x in (steps or []) if str(x)]
+    if lines:
+        y += int(round(6 * dpi))
+        lh = int(round(15 * dpi))
+        for i, line in enumerate(lines):
+            draw_text(hdc, line, text_x + int(8 * dpi), y + i * lh, text_w, dpi,
+                      False, pal.get("body", BODY_RGB))
+        y += len(lines) * lh
+    if footer:
+        y += int(round(6 * dpi))
+        draw_text(hdc, footer, text_x, y, text_w, dpi, False,
+                  pal.get("body", BODY_RGB))
     return {"hbmp": hbmp, "hdc": hdc, "old": old, "buf": buf, "ppv": ppv}
 
 
@@ -497,10 +514,14 @@ def _alpha_cleanup(buf, w: int, h: int, pal: dict) -> None:
 
 # ── поток уведомлений ───────────────────────────────────────────────────────
 class _Toast:
-    __slots__ = ("kind", "title", "body", "duration")
+    __slots__ = ("kind", "title", "body", "duration", "steps", "footer")
 
-    def __init__(self, kind, title, body, duration):
+    def __init__(self, kind, title, body, duration, steps=None, footer=""):
         self.kind, self.title, self.body, self.duration = kind, title, body, duration
+        # ЭТАПЫ С ВРЕМЕНАМИ и итоговая строка — как в карточке помощника
+        # (запасной путь без Qt раньше показывал только текст события).
+        self.steps = [str(x) for x in (steps or [])]
+        self.footer = str(footer or "")
 
 
 def _work_area_for_cursor():
@@ -531,7 +552,8 @@ def _dpi_for_point(x: int, y: int) -> float:
         return 1.0
 
 
-def _measure(w: int, hdc, dpi: float, title: str, body: str) -> int:
+def _measure(w: int, hdc, dpi: float, title: str, body: str, steps=None,
+             footer: str = "") -> int:
     pad = int(14 * dpi)
     size_t = int(15 * dpi)
     size_b = int(13 * dpi)
@@ -557,7 +579,15 @@ def _measure(w: int, hdc, dpi: float, title: str, body: str) -> int:
         bh = r2.bottom - r2.top
         gdi32.SelectObject(hdc, of)
     gdi32.DeleteObject(hf2)
-    return pad * 2 + th + (int(4 * dpi) + bh if body else 0)
+    # высота блока этапов и футера (по одной строке на этап)
+    extra = 0
+    lines = [str(x) for x in (steps or []) if str(x)]
+    if lines:
+        lh = int(round(15 * dpi))
+        extra += int(round(6 * dpi)) + len(lines) * lh
+    if footer:
+        extra += int(round(6 * dpi)) + int(round(14 * dpi))
+    return pad * 2 + th + (int(4 * dpi) + bh if body else 0) + extra
 
 
 class _Notifier:
@@ -651,10 +681,10 @@ class _Notifier:
             width_px = int(_cfg["width"] * self.dpi)
             fps = int(_cfg["fps"])
         hdc = gdi32.CreateCompatibleDC(0)
-        h = _measure(width_px, hdc, self.dpi, t.title, t.body)
+        h = _measure(width_px, hdc, self.dpi, t.title, t.body, t.steps, t.footer)
         gdi32.DeleteDC(hdc)
         card = _render_card(width_px, h, self.dpi, t.kind, t.title, t.body,
-                            palette(current_cfg()))
+                            palette(current_cfg()), t.steps, t.footer)
         if not card:
             _log("не удалось нарисовать карточку — уведомление пропущено")
             with _lock:
@@ -1035,20 +1065,30 @@ def _journal(kind: str, title: str, body: str) -> None:
 
 
 def notify(kind: str, title: str, body: str = "", force: bool = False,
-           duration_ms: int = None) -> bool:
+           duration_ms: int = None, steps=None, footer: str = "") -> bool:
     """Показать уведомление. Возвращает True, если оно поставлено в очередь.
 
     Windows — своё слоистое окно; Linux — системная служба уведомлений.
     ``force`` — для служебных проверок (игнорирует настройку ``enabled``).
+    ``steps`` — строки этапов С ВРЕМЕНАМИ (например «✓ Обрыв обнаружен   50 мс»),
+    ``footer`` — итоговая строка («восстановлено за 1.85 с (1850 мс) · окно
+    закроется через 4 с»). Так запасной путь без Qt показывает тот же состав,
+    что и карточка помощника, а не только текст события.
     """
     with _lock:
         if not _cfg.get("enabled", True) and not force:
             return False
         cfg = dict(_cfg_full)
         dur = int(duration_ms or _cfg.get("duration_ms", DEFAULT_DURATION_MS))
+    step_list = [str(x) for x in (steps or []) if str(x)]
     if not IS_WIN:
-        ok = _posix_notify(kind, title, body, cfg)
-        _journal(kind, title, body)
+        text = body
+        if step_list:
+            text = (text + "\n" if text else "") + "\n".join(step_list)
+        if footer:
+            text = (text + "\n" if text else "") + str(footer)
+        ok = _posix_notify(kind, title, text, cfg)
+        _journal(kind, title, text)
         with _lock:
             _stats["shown"] += 1
             if not ok:
@@ -1056,14 +1096,14 @@ def notify(kind: str, title: str, body: str = "", force: bool = False,
         return ok
     if not _ensure_thread():
         return False
-    _queue.put(_Toast(kind, title, body, dur))
+    _queue.put(_Toast(kind, title, body, dur, steps=step_list, footer=footer))
     if _tid:
         user32.PostThreadMessageW(_tid, WM_WAKE, 0, 0)
     return True
 
 
 def notify_event(event: str, cfg: dict = None, title: str = "", body: str = "",
-                 force: bool = False) -> bool:
+                 force: bool = False, steps=None, footer: str = "") -> bool:
     """Событие -> уведомление. Рутина обновления пула молчит по определению."""
     try:
         import i18n
@@ -1089,7 +1129,7 @@ def notify_event(event: str, cfg: dict = None, title: str = "", body: str = "",
         b_ = body or T(bk)
     else:
         t_, b_ = title or event, body
-    return notify(kind, t_, b_, force=force)
+    return notify(kind, t_, b_, force=force, steps=steps, footer=footer)
 
 
 def wait_idle(timeout: float = 30.0) -> bool:

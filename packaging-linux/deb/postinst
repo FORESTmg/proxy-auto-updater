@@ -32,5 +32,8 @@ fi
 echo "$APP: программа даёт доступ ко всем сайтам, включая заблокированные."
 echo "  Ответственность за соблюдение законов своей юрисдикции лежит на пользователе."
 echo "  Условия использования: /usr/share/doc/$APP/TERMS.ru.md (English: TERMS.md)."
+echo
+echo "ОГРАНИЧЕНИЯ ПРОВЕРКИ: Проверка пакета выполнялась в среде WSL (Linux внутри Windows), а не на установленной системе на реальном железе. Меню и уведомления в графическом интерфейсе протестированы логически, но НЕ проверены на живом рабочем столе — возможны ошибки. Если что-то не работает, сообщите в репозитории."
+echo "TESTING SCOPE: Package testing was performed in WSL (Linux on Windows), not on a real installation on bare metal. The GUI menu and notifications are tested logically but have NOT been verified on a live desktop — issues are possible. If something does not work, please report it in the repository."
 
 exit 0

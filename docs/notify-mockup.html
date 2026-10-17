@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Вид уведомлений — как в оригинальном скрипте (tray.ps1)</title>
+<style>
+  :root{
+    --ok:#41c26d; --err:#dc4f55; --busy:#e5bf37; --off:#9497a0;
+    --card:rgba(26,27,31,.96); --card2:rgba(38,40,46,.96);
+    --txt:#f2f3f5; --muted:#a2a6b0; --line:rgba(255,255,255,.10);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:linear-gradient(135deg,#1b2430,#0f1216 60%,#151a1f);
+    font-family:-apple-system,"Segoe UI",Roboto,Arial,sans-serif;color:var(--txt);
+    padding:18px;min-height:560px;
+  }
+  .stage{position:relative;width:430px;height:520px;margin:0}
+  .desktop-hint{position:absolute;left:0;top:0;font-size:11px;color:#6b7280;letter-spacing:.3px}
+  .zone{position:absolute;right:0;bottom:0;width:400px;height:470px;border-radius:10px;border:1px dashed rgba(255,255,255,.07)}
+  .zone span{position:absolute;right:10px;bottom:8px;font-size:10.5px;color:#5b6270}
+
+  /* ——— карточка уведомления ——— */
+  .toast{
+    position:absolute;right:0;bottom:14px;width:392px;
+    /* оптимизация: только transform и opacity — композитор, без мерцания */
+    transform:translateX(420px);opacity:0;will-change:transform,opacity;
+    background:var(--card);border:1px solid var(--line);border-left:3px solid var(--ok);
+    border-radius:12px;box-shadow:0 18px 45px rgba(0,0,0,.55);
+    padding:13px 15px 12px 14px;backdrop-filter:blur(6px);
+  }
+  .toast.in{animation:slidein 340ms cubic-bezier(.16,.84,.28,1) both}
+  .toast.out{animation:slideout 260ms ease-in both}
+  @keyframes slidein{from{transform:translateX(420px);opacity:0}to{transform:translateX(0);opacity:1}}
+  @keyframes slideout{from{transform:translateX(0);opacity:1}to{transform:translateX(420px);opacity:0}}
+
+  /* мерцающий слой намеренно отсутствует: фон статичен, меняются только transform/opacity/ширина */
+  .head{display:flex;gap:11px;align-items:flex-start}
+  .ico{flex:0 0 34px;width:34px;height:34px;border-radius:9px;background:var(--card2);
+       display:flex;align-items:center;justify-content:center;border:1px solid var(--line);position:relative}
+  .ico svg{width:20px;height:20px}
+  .dot{position:absolute;right:-3px;bottom:-3px;width:12px;height:12px;border-radius:50%;
+       border:2px solid var(--card);background:var(--ok)}
+  .titles{flex:1 1 auto;min-width:0}
+  .t1{font-size:14.5px;font-weight:600;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .t2{font-size:12px;color:var(--muted);margin-top:2px}
+  .spin{flex:0 0 18px;width:18px;height:18px;border-radius:50%;margin-top:4px;
+        border:2px solid rgba(255,255,255,.14);border-top-color:var(--busy);
+        animation:spin .85s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  /* финал: меняется только ЦВЕТ, вращение продолжается — карточка не замирает */
+  .spin.done{border-top-color:var(--ok)}
+
+  /* ——— этапы ——— */
+  .steps{margin:11px 0 9px 45px;display:flex;flex-direction:column;gap:6px}
+  .step{display:flex;align-items:center;gap:8px;font-size:11.8px;color:var(--muted);
+        opacity:0;transform:translateY(3px);transition:opacity 180ms,transform 180ms}
+  .step.on{opacity:1;transform:none}
+  .step .mk{flex:0 0 13px;width:13px;height:13px;border-radius:50%;border:1.5px solid rgba(255,255,255,.22)}
+  .step.done .mk{background:var(--ok);border-color:var(--ok)}
+  .step .nm{flex:1 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .step .ms{flex:0 0 auto;font-variant-numeric:tabular-nums;color:#cfd3da;font-size:11.5px}
+  .step.cur .nm{color:#e8eaee}
+
+  /* ——— полоса времени ——— */
+  .bar{height:3px;border-radius:2px;background:rgba(255,255,255,.10);overflow:hidden;margin:2px 0 0 45px}
+  .bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--busy),var(--ok));border-radius:2px;position:relative;overflow:hidden}
+  /* на удержании по заполненной полосе бежит искра — движение видно всё время показа */
+  .bar i::after{content:"";position:absolute;top:0;bottom:0;width:22%;
+    background:linear-gradient(90deg,rgba(255,255,255,0),rgba(255,255,255,.60),rgba(255,255,255,0));
+    transform:translateX(-120%);animation:sheen 1.1s linear infinite}
+  @keyframes sheen{to{transform:translateX(560%)}}
+  .foot{margin:7px 0 0 45px;font-size:11px;color:#8b909a}
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="desktop-hint">Вид уведомления из оригинального скрипта (tray.ps1) · анимация 60 кадров/с</div>
+  <div class="zone"><span>правый нижний угол экрана, у панели задач</span></div>
+
+  <div class="toast" id="toast">
+    <div class="head">
+      <div class="ico">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+          <path d="M12 3l7 3.5v5.2c0 4.3-2.9 7.8-7 9.3-4.1-1.5-7-5-7-9.3V6.5L12 3z"/>
+        </svg>
+        <span class="dot" id="dot"></span>
+      </div>
+      <div class="titles">
+        <div class="t1" id="t1">Восстановление связи</div>
+        <div class="t2" id="t2">подбор живого сервера</div>
+      </div>
+      <div class="spin" id="spin"></div>
+    </div>
+
+    <div class="steps" id="steps"></div>
+
+    <div class="bar"><i id="prog"></i></div>
+    <div class="foot" id="foot">наблюдение включено</div>
+  </div>
+</div>
+
+<script>
+const STEPS = [
+  ["Обрыв обнаружен (пульс порта)", 50],
+  ["Переключение на новый узел", 600],
+  ["Ядро приняло соединения", 620],
+  ["Данные подтверждены", 1850],
+];
+const TOTAL = 1850;              // общая длительность «процесса», мс
+const $ = id => document.getElementById(id);
+const steps = $("steps");
+STEPS.forEach(([nm]) => {
+  const d = document.createElement("div");
+  d.className = "step";
+  d.innerHTML = '<span class="mk"></span><span class="nm">'+nm+'</span><span class="ms"></span>';
+  steps.appendChild(d);
+});
+const nodes = [...steps.children];
+
+let raf = 0, t0 = 0, phase = "in", hold = 0;
+const ease = t => t<.5 ? 2*t*t : 1-Math.pow(-2*t+2,2)/2;   // плавная кривая полосы
+
+function setState(kind){
+  const map = {ok:"var(--ok)", err:"var(--err)", busy:"var(--busy)", off:"var(--off)"};
+  document.querySelector(".toast").style.borderLeftColor = map[kind] || map.busy;
+  $("dot").style.background = map[kind] || map.busy;
+}
+
+function reset(){
+  $("toast").className = "toast";
+  $("spin").className = "spin";
+  $("t1").textContent = "Восстановление связи";
+  $("t2").textContent = "подбор живого сервера";
+  $("foot").textContent = "наблюдение включено";
+  $("prog").style.width = "0%";
+  nodes.forEach(n => { n.className = "step"; n.querySelector(".ms").textContent = ""; });
+  setState("busy");
+}
+
+function frame(ts){
+  if (!t0) t0 = ts;
+  const el = ts - t0;
+
+  if (phase === "in"){
+    if (el >= 340){ phase = "run"; t0 = ts; }
+  } else if (phase === "run"){
+    const p = Math.min(1, el / TOTAL);
+    $("prog").style.width = (ease(p) * 100).toFixed(2) + "%";
+    STEPS.forEach(([nm, ms], i) => {
+      const at = ms / TOTAL;
+      const n = nodes[i];
+      if (p >= at){
+        if (!n.classList.contains("on")){ n.classList.add("on"); }
+        if (p >= Math.min(1, at + 0.06)){
+          n.classList.add("done"); n.classList.remove("cur");
+          if (!n.querySelector(".ms").textContent) n.querySelector(".ms").textContent = ms + " мс";
+        }
+      } else if (p > 0){
+        n.classList.add("on","cur");
+      }
+    });
+    if (p >= 1){
+      $("t1").textContent = "Связь восстановлена";
+      $("t2").textContent = "связь подтверждена · 1.85 с";
+      $("foot").textContent = "восстановлено за 1.85 с · окно закроется через 4 с";
+      $("spin").className = "spin done";
+      setState("ok");
+      phase = "hold"; t0 = ts;
+    }
+  } else if (phase === "hold"){
+    if (el >= 2600){ $("toast").classList.add("out"); phase = "out"; t0 = ts; }
+  } else if (phase === "out"){
+    if (el >= 300){ phase = "gap"; t0 = ts; }
+  } else if (phase === "gap"){
+    if (el >= 1200){ reset(); $("toast").classList.add("in"); t0 = ts; phase = "in"; }
+  }
+  raf = requestAnimationFrame(frame);
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden){ cancelAnimationFrame(raf); raf = 0; }
+  else if (!raf){ t0 = 0; raf = requestAnimationFrame(frame); }
+});
+
+reset();
+$("toast").classList.add("in");
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

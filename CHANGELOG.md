@@ -4,6 +4,139 @@ All notable changes to **FOREST's Proxy Auto-updater** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-10-18
+
+### Added
+
+- **The notification card is now the approved design, 1:1** (`docs/notify-mockup.html`
+  is the specification). The card is 392 px wide, radius 12, a 3 px state stripe on
+  the left, a 34×34 icon tile, a header with a spinner on the right, a **block of
+  stages with each stage's time in milliseconds**, a **time bar**, and a footer.
+  State colours are the mockup's own table (ok `#41c26d`, error `#dc4f55`,
+  busy `#e5bf37`, off `#9497a0`). The stages come from the original script
+  (`D:\v2ray-auto-updater\tray.ps1`): *Обрыв обнаружен (пульс порта)*,
+  *Переключение на новый узел*, *Ядро приняло соединения*, *Данные подтверждены*,
+  and the final line is *восстановлено за 1.85 с · окно закроется через 4 с*.
+- **The user's own icon inside the notification.** The card draws the same
+  `packaging/app.ico` artwork through the very same code path as the tray icon
+  (`tray_icon.state_ico` → pixel-identical drawing + the state badge in the
+  corner). `forest-ui --selftest` compares the pixmap the card actually paints
+  against the tray icon raster: **1024/1024 pixels identical (100 %)**.
+- **A measurement of the smoothness, not a promise.** The card drives its frames
+  on an absolute 60 fps grid and records the real intervals between paints.
+  Measured on the live PC: **average 60.1 fps, 388 frames, worst frame 25.1 ms
+  (1.5 frame periods), 0 dropped frames after the entrance, 0 stalls** (frames
+  longer than two periods). Only transform (window position) and opacity change
+  between frames; the static layer (background, border, stripe, icon tile,
+  artwork, title, subtitle, bar track, footer) is rendered **once** into a
+  `QPixmap`, so there is nothing for Qt to repaint in parts — no flicker.
+- **Focus proof.** The card never becomes the foreground window: the selftest
+  samples `GetForegroundWindow` during the whole animation and asserts the card's
+  own HWND never appears in the samples (measured: 0 times), and that the user's
+  foreground window does not change.
+- **The same card on Linux**, with a fallback to a system D-Bus notification when
+  there is no graphical session or the card cannot be shown. The fallback carries
+  the stages with their times in the body of the system notification.
+  `notify.card_on_linux` (default `true`) switches it off.
+- **The Qt-free fallback (`src/notify.py`) now shows stages and the recovery
+  time too.** Its layered Win32 card grew a stage block (`✓ Обрыв обнаружен
+  (пульс порта)   50 мс`) and a footer (`восстановлено за 1.85 с (1850 мс) ·
+  окно закроется через 4 с`); `tray._notify_details` builds them from the
+  watchdog state, so the built-in tray shows the same content as the Qt helper.
+- **Package dependencies for the Qt helper.** The Qt platform plugins (`xcb`,
+  `wayland`, `offscreen`) and the Qt libraries travel **inside** the bundle; the
+  system libraries are now declared in all three package formats. `.deb`:
+  `libxkbcommon-x11-0, libxcb-cursor0, libxcb-icccm4, libxcb-image0,
+  libxcb-keysyms1, libxcb-render-util0, libxcb-shape0, libxcb-xkb1, libgl1,
+  libegl1`. `.rpm`: the same libraries **by SONAME** (`libxkbcommon-x11.so.0()(64bit)`
+  …) so the names do not depend on the distribution. Arch: `libxkbcommon-x11,
+  xcb-util-cursor, xcb-util-wm, xcb-util-image, xcb-util-keysyms,
+  xcb-util-renderutil, libxcb` (+ `libglvnd`/`mesa` as optional). Verified by
+  measurement: without these libraries `QT_QPA_PLATFORM=xcb forest-ui` does not
+  start at all (*libxkbcommon-x11.so.0: cannot open shared object file*); after
+  installing exactly this set the helper starts and draws the card.
+- **Honest testing-scope notices in the Linux packages and docs.** The `.deb`
+  description, the `.rpm` `%description`, the Arch `PKGBUILD` (`pkgdesc` and the
+  install script message), the README shipped inside the AppImage and the portable
+  `.tar.gz`, `README.md`/`README.ru.md` and `docs/LINUX-INSTALL.md`/`.ru.md` all
+  state that the package was tested in WSL and the GUI menu/notifications were
+  **not** verified on a live desktop. The Windows build carries no such caveat —
+  it is tested on a live PC.
+- **The tray menu is one menu again — its own single window with submenus that
+  open on hover.** The menu is drawn by `src/ui_menu.py` / `src/ui_style.py` (a
+  frameless `Qt.Popup` window, *not* a `QMenu`), so the whole menu — panel,
+  rows, the state stripe, the highlight and the submenus — uses one style table
+  and one text layer. A submenu opens **on hover** after the style delay
+  (`ui_style.SUB_HOVER_OPEN_MS`, 150 ms; measured on the live PC: **159-163 ms**),
+  closes through a **280 ms** grace window when the cursor leaves (**283 ms**
+  measured), a plain pass over an item with a submenu does **not** open it,
+  moving to a different item with a submenu **reuses the same panel**
+  (**4.7-6.0 ms**), and returns to the previous item cancel the close. Keyboard
+  behaviour is unchanged (Right opens, Left/Esc close, arrows do not open).
+- **A menu highlight that keeps up with the cursor.** Moving the mouse moves the
+  highlight **in the same input event** and fades it in with a short 50 ms tempo
+  (`HL_MOUSE_MS`), while keyboard navigation keeps the smooth 180 ms glide
+  (`STEP_FADE_MS`). Measured on the live PC against the previous build: the
+  highlight reaches the hovered row in a median of **12-15 ms** instead of
+  700-990 ms, frames showing an intermediate highlight: **0** (was 467-522),
+  frames with two highlight bands at once: **0**, and the highlight band is on
+  the right row in **6 of 6** steps on both monitors (100 % and 150 % scaling).
+
+### Changed
+
+- The notification card's entrance is **340 ms** with the mockup's
+  `cubic-bezier(.16,.84,.28,1)` and the exit is **260 ms** with `ease-in`; the
+  slide is 420 px, the spinner turns once per 0.85 s, and a stage counts as passed
+  when the bar is 6 % past it — every one of these numbers is read **from the
+  mockup file** by the selftest and compared with the code.
+- The final state is applied **in place**: when the supervisor reports the end of
+  the same process, the card that is already on screen changes to the final
+  appearance instead of sliding in a second time (as in the mockup).
+- `notify.width` default is 392 px (matches the card).
+- The Arch `PKGBUILD` URL now points at the real repository.
+- **The whole tray menu (and its submenus) is drawn from one style table**
+  (`src/ui_style.py`): panel padding, row height, stripe, radii, colours, the
+  hover timings and the shadow are single constants instead of inline numbers, so
+  the main menu and a submenu cannot drift apart. Numbers taken from
+  `docs/menu-mockup.html` are pinned by the selftest (`--menu-shots`,
+  `--selftest`, `src/ui_style.py --selftest`). The menu item for the direct-RU
+  filter reads **«РФ — напрямую»** (`tray.menu.filter_ru`) and the tick follows
+  the live setting.
+
+### Fixed
+
+- **A frame could be up to 25 ms instead of 16.7 ms (uneven pacing)** because the
+  frame timer only checked the grid every half period; the check is now four times
+  per period and the frame is drawn on the nearest tick after its `n/60` deadline.
+- `forest-ui --selftest` no longer measures a "focus stolen" that was really the
+  terminal taking focus: the check is now "the card's HWND never becomes
+  foreground" plus "the user's foreground window does not change".
+- **Right-clicking the tray icon could crash the helper and the menu never
+  appeared.** The activation handler built the menu inside a try-block that
+  re-raised the error from the tray callback, so a failing menu took the whole
+  helper down (`RuntimeError: не удалось открыть своё меню (повтор)`); the
+  handler now recovers, writes the traceback to `logs/crash.log` and the menu is
+  shown on the next activation. Proved on the live installation with **5 real
+  right-clicks in a row** (`SendInput`, the icon found by UIA in the notification
+  area): **5/5 opened the menu, 0 crashes**, both helper pids unchanged, Esc and
+  a click outside close it.
+- **The tray icon could disappear and the helper never came back.** `ui_helper.
+  _pid_alive()` treated a successful `OpenProcess` as a live process, but that
+  call also succeeds for a finished process whose handle is not released yet: a
+  stale pid 31800 in `state/ui_helper.json` made the supervisor believe the helper
+  was running, so it never started the real one (no icon in the tray). Liveness is
+  now `OpenProcess` + `WaitForSingleObject(h, 0)` (`WAIT_TIMEOUT` = alive,
+  `WAIT_OBJECT_0` = finished), `_pid_image()` / `_is_our_helper()` only accept a
+  pulse if **our** helper file runs under that pid, and in a frozen build
+  `we_are_helper()` additionally requires the executable's own name
+  (`forest-ui.exe`), so an inherited `FOREST_UI=1` can no longer make the
+  supervisor consider itself the helper.
+- **`state/status.txt` was written with `?` instead of Cyrillic.** The
+  human-readable status was taken from the ASCII-safe stdout buffer
+  (`safestdio.say` deliberately replaces non-ASCII outside a console); the report
+  is now collected from the original strings and the file is written in UTF-8,
+  while stdout stays ASCII.
+
 ## [1.2.2] — 2026-10-17
 
 ### Fixed

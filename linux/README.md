@@ -2,6 +2,19 @@
 
 Кратко: как поставить, чем управлять и где что лежит.
 
+## Ограничения проверки
+
+**ОГРАНИЧЕНИЯ ПРОВЕРКИ (RU):** Проверка пакета выполнялась в среде WSL (Linux
+внутри Windows), а не на установленной системе на реальном железе. Меню и
+уведомления в графическом интерфейсе протестированы логически, но НЕ проверены
+на живом рабочем столе — возможны ошибки. Если что-то не работает, сообщите в
+репозитории.
+
+**TESTING SCOPE (EN):** Package testing was performed in WSL (Linux on Windows),
+not on a real installation on bare metal. The GUI menu and notifications are
+tested logically but have NOT been verified on a live desktop — issues are
+possible. If something does not work, please report it in the repository.
+
 ## Что это
 
 Тот же продукт, что и на Windows, но с ядром `xray` (не `xray.exe`), юнитами

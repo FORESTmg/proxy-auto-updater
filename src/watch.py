@@ -93,6 +93,96 @@ def _tray_settle(cfg: dict, client: dict, proc, lg, rtt=None) -> None:
         lg.error(f"Watch: финал индикации: {e}")
 
 
+# ── РЕАЛЬНЫЙ ОБРЫВ -> карточка уведомления ────────────────────────────────
+# Сторож обязан показать КАЖДЫЙ настоящий обрыв связи, включая быстрый путь
+# «пульсом» (сотни миллисекунд). Раньше быстрый путь писал только state="ok"
+# по факту восстановления — перехода состояния помощник не видел, и карточки не
+# было ВООБЩЕ (замер на живом ПК: разрыв 712 мс, уведомления нет).
+#
+# Порог (NOTIFY_MIN_GAP_MS): ниже него считаем, что связь для пользователя НЕ
+# прерывалась — плановый перезапуск ядра поднимает порт за десятки миллисекунд
+# (start_core опрашивает порт шагом 10 мс), данные не теряются, а снятие ядра
+# штатно отдельный случай (см. проверку «плановый перезапуск, не обрыв»).
+# Числа-ориентиры: плановый перезапуск < 200 мс, замеренный реальный обрыв
+# 712 мс; порог 250 мс отделяет одно от другого с запасом ~3x и при этом не
+# зависит от частоты опроса (сторож замечает смерть порта за 50-350 мс).
+NOTIFY_MIN_GAP_MS = 250.0
+
+
+def _notify_gap_ms(cfg: dict) -> float:
+    """Порог показа карточки: настройка watch.notify_min_gap_ms (мс)."""
+    try:
+        v = float(((cfg or {}).get("watch") or {}).get("notify_min_gap_ms",
+                                                       NOTIFY_MIN_GAP_MS))
+        return max(0.0, v)
+    except Exception:
+        return NOTIFY_MIN_GAP_MS
+
+
+def _outage_gap_ms(cfg: dict, t_lost: float, t_now: float) -> float:
+    """Разрыв связи в мс: ЗАМЕР ПЕРЕЗАПУСКА ядра, иначе собственный замер.
+
+    ``balancer_gap_ms`` считает сам перезапуск (от снятия ядра до момента, когда
+    новое ядро приняло клиентский порт) — это и есть время, когда данные через
+    прокси не шли.
+    """
+    try:
+        v = CW.StateStore(cfg).data.get("balancer_gap_ms")
+        if v is not None:
+            return max(0.0, float(v))
+    except Exception:
+        pass
+    return max(0.0, (float(t_now) - float(t_lost)) * 1000.0)
+
+
+def _outage_steps(gap_ms: float, total_ms: float) -> list:
+    """Этапы обрыва со ВРЕМЕНЕМ КАЖДОГО В МИЛЛИСЕКУНДАХ (реальные замеры)."""
+    gap = max(0.0, float(gap_ms))
+    total = max(gap, float(total_ms))
+    return [("Обрыв обнаружен (пульс порта)", 0.05),
+            ("Разрыв связи: перезапуск ядра", gap / 1000.0),
+            ("Данные подтверждены (204 + TLS)", total / 1000.0)]
+
+
+def _outage_done(cfg: dict, t_lost: float, t_now: float, lg, ok: bool = True,
+                 why: str = "пульс порта") -> float:
+    """Конец РЕАЛЬНОГО обрыва: карточка показывается, если связь ПРЕРЫВАЛАСЬ.
+
+    Возвращает замеренный разрыв в мс. Пишет состояние и описание процесса так,
+    чтобы помощник интерфейса показал ОДНУ карточку состава макета (заголовок,
+    подпись, этапы с мс, полоса, спиннер, футер) — и по провалу, и по успеху.
+    """
+    gap = _outage_gap_ms(cfg, t_lost, t_now)
+    total = max(gap, (float(t_now) - float(t_lost)) * 1000.0)
+    steps = _outage_steps(gap, total)
+    if not ok:
+        try:
+            proc = TS.make_proc("restore", "outage", steps, eta_s=total / 1000.0)
+            proc["started"] = float(t_lost)
+            TS.fail_proc(cfg, proc, "down", _tip("НЕТ СВЯЗИ"),
+                         reason="серверы пула не отвечают")
+            lg.info(f"Watch: обрыв {gap:.0f} мс — карточка провала показана")
+        except Exception as e:
+            lg.warn(f"Watch: карточка провала: {e}")
+        return gap
+    try:
+        if gap < _notify_gap_ms(cfg):
+            TS.write_status(cfg, state="ok", drop_proc=True, tip=_tip("связь OK"))
+            lg.info(f"Watch: разрыв {gap:.0f} мс < порога "
+                    f"{_notify_gap_ms(cfg):.0f} мс — связь не прерывалась, "
+                    "уведомление не показываем")
+            return gap
+        proc = TS.make_proc("restore", "outage", steps, eta_s=total / 1000.0)
+        proc["started"] = float(t_lost)
+        proc["steps"][0]["done"] = True
+        TS.finish_proc(cfg, proc, "ok", tip=_tip("связь OK"))
+        lg.info(f"Watch: обрыв {gap:.0f} мс — карточка показана "
+                f"(этапы: 50 / {gap:.0f} / {total:.0f} мс)")
+    except Exception as e:
+        lg.warn(f"Watch: карточка обрыва: {e}")
+    return gap
+
+
 def run_watch(cfg: dict, stop_event=None, full_cycle=None, once: bool = False,
               client: dict = None) -> int:
     """Основной цикл сторожа. ``stop_event`` — threading.Event для остановки."""
@@ -297,6 +387,9 @@ def run_watch(cfg: dict, stop_event=None, full_cycle=None, once: bool = False,
                 except Exception:
                     pass
                 lg.warn("Watch: обрыв — пересобираю балансировщик")
+                # Обрыв начался не сейчас, а когда исчезла связь: берём время
+                # последней УСПЕШНОЙ отметки «связь OK», иначе — окно ударов.
+                t_lost = float(last_ok_mark or (time.time() - strikes * interval))
                 try:
                     TS.write_status(cfg, state="down", tip=_tip("НЕТ СВЯЗИ"))
                 except Exception:
@@ -310,7 +403,9 @@ def run_watch(cfg: dict, stop_event=None, full_cycle=None, once: bool = False,
                 if recovered:
                     ok2, rtt2 = CW.probe_client(client, timeout=probe_timeout)
                     if ok2:
-                        lg.info(f"Watch: связь восстановлена балансировщиком (rtt={rtt2})")
+                        gap2 = _outage_done(cfg, t_lost, time.time(), lg, ok=True)
+                        lg.info(f"Watch: связь восстановлена балансировщиком "
+                                f"(rtt={rtt2}, разрыв {gap2:.0f} мс)")
                         try:
                             TS.write_status(cfg, state="ok", rtt=rtt2)
                         except Exception:
@@ -323,6 +418,7 @@ def run_watch(cfg: dict, stop_event=None, full_cycle=None, once: bool = False,
                         except Exception as e:
                             lg.warn(f"Watch: bl_add_pool: {e}")
                 if not recovered:
+                    _outage_done(cfg, t_lost, time.time(), lg, ok=False)
                     lg.warn("Watch: пул не помог — полный цикл (свежие серверы)")
                     if full_cycle:
                         full_cycle()
@@ -366,6 +462,14 @@ def run_watch(cfg: dict, stop_event=None, full_cycle=None, once: bool = False,
             except Exception:
                 pass
             lg.warn("Watch: пульс — ядро не слушает порт, пересборка немедленно")
+            t_lost = time.time()
+            # РЕАЛЬНЫЙ ОБРЫВ. Сразу помечаем состояние «восстановление связи»:
+            # помощник видит, что связь пропала, а карточку рисуем ПО ЗАМЕРУ на
+            # восстановлении — разрыв короче порога уведомления не даёт.
+            try:
+                TS.beat(cfg, "restoring", tip=_tip("восстановление связи"))
+            except Exception:
+                pass
             try:
                 st_p = CW.StateStore(cfg)
                 st_p.data["last_probe_fail_ts"] = time.time()
@@ -380,16 +484,22 @@ def run_watch(cfg: dict, stop_event=None, full_cycle=None, once: bool = False,
             if rec:
                 ok_p, rtt_p = CW.probe_client(client, timeout=probe_timeout)
                 if ok_p:
-                    lg.info(f"Watch: связь восстановлена по пульсу (rtt={rtt_p})")
+                    gap = _outage_done(cfg, t_lost, time.time(), lg, ok=True,
+                                       why="пульс порта")
+                    lg.info(f"Watch: связь восстановлена по пульсу (rtt={rtt_p}, "
+                            f"разрыв {gap:.0f} мс)")
                     try:
                         TS.write_status(cfg, state="ok", rtt=rtt_p)
                     except Exception:
                         pass
                 else:
                     rec = False
-            if not rec and full_cycle:
-                lg.warn("Watch: пульс не помог — полный цикл")
-                full_cycle()
+            if not rec:
+                _outage_done(cfg, t_lost, time.time(), lg, ok=False,
+                             why="пульс порта")
+                if full_cycle:
+                    lg.warn("Watch: пульс не помог — полный цикл")
+                    full_cycle()
             strikes = 0
     return 0
 

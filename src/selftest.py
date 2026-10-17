@@ -398,6 +398,69 @@ def main() -> int:
 
     _say()
     _say("=" * 64)
+    _say("12б. ОБРЫВ СВЯЗИ -> карточка уведомления: порог и РЕАЛЬНЫЕ времена")
+    _say("=" * 64)
+    # Сторож обязан показать КАЖДЫЙ настоящий обрыв (в т.ч. быстрый «пульсом»),
+    # но молчать, если связь для пользователя не прерывалась (короткий
+    # ПЛАНОВЫЙ перезапуск ядра). Решение принимается по ЗАМЕРУ разрыва.
+    import log as _LG
+    import tray_status as TS
+    import watch as W
+
+    _lg = _LG.get_logger()
+    cfg_w = dict(cfg2)
+    cfg_w["paths"] = dict(cfg2["paths"])
+    cfg_w["watch"] = dict(cfg2.get("watch") or {})
+    stw = CW.StateStore(cfg_w)
+    stw.data["balancer_gap_ms"] = 120.0      # плановый перезапуск: порт за 120 мс
+    stw.save()
+    TS.write_status(cfg_w, state="ok", drop_proc=True, tip="x")
+    t0w = time.time() - 0.6
+    gap_small = W._outage_done(cfg_w, t0w, time.time(), _lg, ok=True)
+    st_after = TS.read_status(cfg_w) or {}
+    check("короткий разрыв (< порога) НЕ даёт карточки (нет уведомления-спама)",
+          gap_small < W._notify_gap_ms(cfg_w)
+          and not (st_after.get("proc") or {}).get("steps"),
+          f"gap={gap_small:.0f} мс, proc={bool((st_after.get('proc') or {}))}")
+    # РЕАЛЬНЫЙ обрыв: замер 712 мс — карточка с этапами и настоящим временем
+    stw = CW.StateStore(cfg_w)
+    stw.data["balancer_gap_ms"] = 712.0
+    stw.save()
+    t0w = time.time() - 3.4
+    gap_big = W._outage_done(cfg_w, t0w, time.time(), _lg, ok=True)
+    st_after = TS.read_status(cfg_w) or {}
+    proc_w = st_after.get("proc") or {}
+    steps_w = proc_w.get("steps") or []
+    check("реальный разрыв (>= порога) ДАЁТ карточку с этапами",
+          gap_big >= W._notify_gap_ms(cfg_w) and len(steps_w) == 3
+          and proc_w.get("final") is True and st_after.get("state") == "ok",
+          f"gap={gap_big:.0f} мс, steps={len(steps_w)}, final={proc_w.get('final')}")
+    check("этапы карточки несут РЕАЛЬНЫЕ времена в мс (50 / разрыв / итог)",
+          bool(steps_w) and int(round(float(steps_w[1].get("t") or 0) * 1000)) == 712
+          and all(s.get("done") for s in steps_w),
+          str([(s.get("nm"), round(float(s.get("t") or 0) * 1000)) for s in steps_w]))
+    import status_info as SIw
+    n_w = SIw.notif(proc_w)
+    check("подпись/футер карточки — с ИТОГОВЫМ временем и без «0.00 с»",
+          "0.00" not in n_w["sub"] and "0.00" not in n_w["footer"]
+          and ("с" in n_w["sub"]), f'{n_w["sub"]!r} / {n_w["footer"]!r}')
+    # ПРОВАЛ восстановления: карточка тоже есть (и с этапами)
+    stw = CW.StateStore(cfg_w)
+    stw.data["balancer_gap_ms"] = 900.0
+    stw.save()
+    W._outage_done(cfg_w, time.time() - 5.0, time.time(), _lg, ok=False)
+    proc_f = (TS.read_status(cfg_w) or {}).get("proc") or {}
+    check("провал восстановления тоже даёт карточку (final+failed, этапы)",
+          proc_f.get("final") is True and proc_f.get("failed") is True
+          and len(proc_f.get("steps") or []) == 3,
+          f"final={proc_f.get('final')}, failed={proc_f.get('failed')}")
+    check("порог показа карточки — из настроек (watch.notify_min_gap_ms)",
+          float(W._notify_gap_ms({"watch": {"notify_min_gap_ms": 111}})) == 111.0
+          and float(W._notify_gap_ms({})) == W.NOTIFY_MIN_GAP_MS,
+          str(W.NOTIFY_MIN_GAP_MS))
+
+    _say()
+    _say("=" * 64)
     _say("13. Постоянная копия ядра (вне временного _MEI) и уборка распаковок")
     _say("=" * 64)
     # Ядро, запущенное из каталога распаковки onefile (_MEIPASS), переживает
@@ -713,21 +776,195 @@ def main() -> int:
         UH.launch = orig_launch
     check("помощник: свободный замок -> запуск ровно один раз",
           len(launched2) == 1, str(len(launched2)))
+    # Самоопределение помощника: ОДНОГО признака окружения мало — оно достаётся
+    # по наследству. В сборке «я помощник» = env + имя своего файла, иначе
+    # супервизор (получивший env от помощника) никогда не поднял бы настоящий
+    # помощник, и значка в трее не было бы.
     os.environ[UH.HELPER_ENV] = "1"
-    launched3 = []
-    UH.launch = lambda cfg, log_msg=True: (launched3.append(1), True)[1]
-    try:
-        UH.ensure(cfg_wd)
-    finally:
-        UH.launch = orig_launch
-        os.environ.pop(UH.HELPER_ENV, None)
-    check("помощник: процесс-помощник не поднимает вторую копию", not launched3,
-          str(launched3))
+    frozen_here = bool(getattr(sys, "frozen", False))
+    exe_is_helper = os.path.basename(sys.executable).lower().startswith("forest-ui")
+    if frozen_here and not exe_is_helper:
+        check("помощник: env-признак без имени файла НЕ делает процесс помощником",
+              UH.we_are_helper() is False)
+        # и тогда ensure() обязан поднять помощник, а не «решить, что я и есть он»
+        launched_env = []
+        UH.launch = lambda cfg, log_msg=True: (launched_env.append(1), True)[1]
+        try:
+            UH.ensure(cfg_wd)
+        finally:
+            UH.launch = orig_launch
+            os.environ.pop(UH.HELPER_ENV, None)
+        check("помощник: унаследованный env не мешает супервизору поднять помощник",
+              len(launched_env) == 1, str(launched_env))
+    else:
+        check("помощник: процесс-помощник узнаёт себя", UH.we_are_helper() is True)
+        launched3 = []
+        UH.launch = lambda cfg, log_msg=True: (launched3.append(1), True)[1]
+        try:
+            UH.ensure(cfg_wd)
+        finally:
+            UH.launch = orig_launch
+            os.environ.pop(UH.HELPER_ENV, None)
+        check("помощник: процесс-помощник не поднимает вторую копию", not launched3,
+              str(launched3))
     for _l in (UH.lock_path(cfg_wd), UH.spawn_lock_path(cfg_wd)):
         try:
             os.unlink(_l)
         except Exception:
             pass
+
+    # 14.5a ЖИВОСТЬ pid — то, из-за чего на живом ПК не было значка в трее:
+    # OpenProcess отвечал успехом для завершённого процесса, пульс с мёртвым pid
+    # считался работающим помощником, и супервизор его никогда не поднимал.
+    import subprocess as _sp
+    import ui_cmd as _UC
+    _NO_WIN = 0x08000000 if os.name == "nt" else 0      # CREATE_NO_WINDOW
+    check("живость: _pid_alive(свой pid) = True",
+          UH._pid_alive(os.getpid()) is True, str(os.getpid()))
+    check("живость: _pid_alive(0) и _pid_alive(-7) = False",
+          UH._pid_alive(0) is False and UH._pid_alive(-7) is False)
+    # живой ЧУЖОЙ процесс: имя файла не forest-ui(.exe) -> _is_our_helper False
+    if os.name == "nt":
+        _live_cmd = [os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                                  "System32", "ping.exe"), "-n", "40",
+                     "127.0.0.1"]
+    else:
+        _live_cmd = ["sleep", "40"]
+    _live = _sp.Popen(_live_cmd, stdin=_sp.DEVNULL, stdout=_sp.DEVNULL,
+                      stderr=_sp.DEVNULL, creationflags=_NO_WIN)
+    try:
+        check("живость: живой чужой pid = True", UH._pid_alive(_live.pid) is True,
+              str(_live.pid))
+        check("живость: чужой процесс не считается нашим помощником",
+              UH._is_our_helper(_live.pid, cfg_wd) is False, str(_live.pid))
+        check("живость: путь образа чужого pid читается",
+              UH._pid_image(_live.pid).lower().endswith(".exe")
+              if os.name == "nt" else bool(UH._pid_image(_live.pid)),
+              UH._pid_image(_live.pid))
+    finally:
+        try:
+            _live.kill()
+            _live.wait(timeout=10)
+        except Exception:
+            pass
+    # мёртвый pid: процесс завершён, но хендл ещё не освобождён — ровно тот
+    # случай, на котором ломался OpenProcess-вариант
+    _dead = _sp.Popen([os.environ.get("COMSPEC", "cmd.exe"), "/c", "exit"]
+                      if os.name == "nt" else ["true"],
+                      stdin=_sp.DEVNULL, stdout=_sp.DEVNULL,
+                      stderr=_sp.DEVNULL, creationflags=_NO_WIN)
+    _dead.wait(timeout=20)
+    check("живость: завершённый pid = False (а не «жив» по хендлу)",
+          UH._pid_alive(_dead.pid) is False, str(_dead.pid))
+
+    # полная цепочка: пульс с мёртвым pid НЕ должен считаться работающим
+    # помощником, а живой процесс с именем forest-ui.exe — должен.
+    _fake_dir = os.path.join(_TMP, "fake_helper")
+    _fake_state = os.path.join(_TMP, "fake_state")
+    os.makedirs(_fake_dir, exist_ok=True)
+    os.makedirs(_fake_state, exist_ok=True)
+    _fake = os.path.join(_fake_dir, UH.helper_name())
+    _have_fake = False
+    _fake_args = []
+    try:
+        if os.name == "nt":
+            shutil.copy2(os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                                      "System32", "ping.exe"), _fake)
+            _fake_args = ["-n", "60", "127.0.0.1"]
+            _have_fake = True
+        else:
+            # На Linux «наш ли это файл» решает путь ОБРАЗА процесса
+            # (/proc/<pid>/exe): у скрипта там интерпретатор, а не скрипт, так что
+            # проверять надо настоящий ELF под именем помощника — ровно как копия
+            # ping.exe -> forest-ui.exe на Windows.
+            # Симлинки НЕ годятся: мультиколл-бинарники (uutils coreutils,
+            # busybox) выбирают апплет по argv[0] и с чужим именем отказываются
+            # стартовать («coreutils: unknown program 'forest-ui'»), а
+            # /proc/<pid>/exe у симлинка разрешается в цель, а не в имя.
+            _script = os.path.join(_fake_dir, "fake_helper.sh")
+            with open(_script, "w", encoding="utf-8") as _f:
+                # без shell-оптимизации «exec последней команды» (иначе образ
+                # процесса подменился бы на sleep) и без сирот: дочерний sleep
+                # живёт максимум секунду
+                _f.write("while :; do sleep 1; done\n")
+            for _src, _args in ((shutil.which("sleep"), ["60"]),
+                                ("/bin/dash", [_script]),
+                                ("/bin/bash", [_script]),
+                                ("/usr/bin/bash", [_script])):
+                if not _src or not os.path.isfile(_src) or os.path.islink(_src):
+                    continue
+                try:
+                    shutil.copy2(_src, _fake)
+                    os.chmod(_fake, 0o755)
+                except Exception:
+                    continue
+                _probe = _sp.Popen([_fake] + _args, stdin=_sp.DEVNULL,
+                                   stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                                   creationflags=_NO_WIN)
+                time.sleep(0.3)
+                if _probe.poll() is None:
+                    _fake_args = _args
+                    _have_fake = True
+                    try:
+                        _probe.kill()
+                        _probe.wait(timeout=10)
+                    except Exception:
+                        pass
+                    break
+                try:
+                    _probe.wait(timeout=5)
+                except Exception:
+                    pass
+    except Exception:
+        _have_fake = False
+    cfg_fake = {"paths": {"root": _fake_dir, "state_dir": _fake_state},
+                "ui": {"helper": "on", "helper_exe": _fake}}
+    if _have_fake:
+        check("помощник: helper_path находит наш файл помощника",
+              os.path.abspath(UH.helper_path(cfg_fake)).lower()
+              == os.path.abspath(_fake).lower(), UH.helper_path(cfg_fake))
+        _fh = _sp.Popen([_fake] + _fake_args,
+                        stdin=_sp.DEVNULL, stdout=_sp.DEVNULL,
+                        stderr=_sp.DEVNULL, creationflags=_NO_WIN)
+        try:
+            time.sleep(0.4)
+            check("помощник: наш файл по pid опознан (_is_our_helper)",
+                  UH._is_our_helper(_fh.pid, cfg_fake) is True, str(_fh.pid))
+            _UC.write_ping(cfg_fake, _fh.pid, "selftest")
+            check("помощник: пульс + живой наш pid -> running_pid = pid",
+                  UH.running_pid(cfg_fake) == _fh.pid, str(UH.running_pid(cfg_fake)))
+            check("помощник: running() = True по живому пульсу",
+                  UH.running(cfg_fake) is True)
+        finally:
+            try:
+                _fh.kill()
+                _fh.wait(timeout=10)
+            except Exception:
+                pass
+        # тот же пульс, но процесс уже мёртв: помощника НЕТ, замок свободен
+        time.sleep(0.2)
+        check("помощник: пульс с МЁРТВЫМ pid -> running_pid = 0 (дефект трея)",
+              UH.running_pid(cfg_fake) == 0, str(UH.running_pid(cfg_fake)))
+        check("помощник: пульс с мёртвым pid -> running() = False",
+              UH.running(cfg_fake) is False)
+        # ensure() ОБЯЗАН поднять помощник заново: именно этого не делал
+        # супервизор, пока считал мёртвый pid живым
+        relaunch = []
+        UH.launch = lambda cfg, log_msg=True: (relaunch.append(1), True)[1]
+        try:
+            UH.ensure(cfg_fake)
+        finally:
+            UH.launch = orig_launch
+        check("помощник: мёртвый пульс -> ensure() снова запускает помощник",
+              len(relaunch) == 1, str(relaunch))
+    else:
+        check("помощник: поддельный файл помощника создан", False, _fake)
+    try:
+        _UC.clear_ping(cfg_fake)
+    except Exception:
+        pass
+    shutil.rmtree(_fake_dir, ignore_errors=True)
+    shutil.rmtree(_fake_state, ignore_errors=True)
 
     # 14.6 отчёт/статус задачи (только чтение)
     os.environ["FOREST_TASK_NAME"] = "ForestSelftest-NoSuchTask-QZ"
@@ -805,10 +1042,14 @@ def main() -> int:
         _say(f"{i18n.t('selftest.failed')}: {len(FAILED)}")
         for f in FAILED:
             _say(f"  - {f}")
+        # ASCII-итог для оконной сборки: safe_stdio заменяет кириллицу на «?»,
+        # и по выводу frozen-сборки иначе не понять, чем кончилось дело
+        _say(f"SELFTEST: FAILED ({len(FAILED)})")
         _cleanup()
         return 1
     _say(i18n.t("selftest.passed"))
     _say("=" * 64)
+    _say("SELFTEST: PASSED")
     _cleanup()
     return 0
 

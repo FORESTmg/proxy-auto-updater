@@ -22,6 +22,25 @@ License:        GPL-3.0-only
 URL:            @HOMEPAGE@
 BuildArch:      x86_64
 Requires:       curl
+# Помощник интерфейса (forest-ui, Qt6) грузит плагин платформы xcb/wayland.
+# Сам плагин ЕДЕТ В КОМПЛЕКТЕ (PySide6/Qt/plugins/platforms), а эти системные
+# библиотеки объявлены по SONAME — так имя пакета не зависит от дистрибутива
+# (Fedora: libxkbcommon-x11, xcb-util-cursor, xcb-util-wm, xcb-util-keysyms,
+# xcb-util-image, xcb-util-renderutil, libxcb). Проверено: без них
+# `QT_QPA_PLATFORM=xcb forest-ui` не стартует («libxkbcommon-x11.so.0: cannot
+# open shared object file»).
+Requires:       libxkbcommon-x11.so.0()(64bit)
+Requires:       libxcb-cursor.so.0()(64bit)
+Requires:       libxcb-icccm.so.4()(64bit)
+Requires:       libxcb-image.so.0()(64bit)
+Requires:       libxcb-keysyms.so.1()(64bit)
+Requires:       libxcb-render-util.so.0()(64bit)
+Requires:       libxcb-shape.so.0()(64bit)
+Requires:       libxcb-xkb.so.1()(64bit)
+# libGL/libEGL Qt грузит ДИНАМИЧЕСКИ (dlopen) для GL-интеграции xcb. Без них
+# помощник работает (программная отрисовка), но объявляем — так GL точно есть.
+Recommends:     libGL.so.1()(64bit)
+Recommends:     libEGL.so.1()(64bit)
 
 %description
 Программа сама скачивает публичные списки прокси-серверов, проверяет их
@@ -36,6 +55,15 @@ Requires:       curl
 
 Конфиг: /etc/forest-proxy-updater/config.json, состояние и логи:
 /var/lib/forest-proxy-updater, документация: /usr/share/doc/forest-proxy-updater.
+
+Помощник интерфейса (forest-ui, Qt6) рисует значок в трее, меню и уведомления.
+Плагины платформ Qt (xcb/wayland) и библиотеки Qt едут В КОМПЛЕКТЕ; системные
+библиотеки объявлены в Requires (libxkbcommon-x11, xcb-util-cursor, xcb-util-wm,
+xcb-util-keysyms, xcb-util-image, xcb-util-renderutil, libxcb).
+
+ОГРАНИЧЕНИЯ ПРОВЕРКИ (RU): Проверка пакета выполнялась в среде WSL (Linux внутри Windows), а не на установленной системе на реальном железе. Меню и уведомления в графическом интерфейсе протестированы логически, но НЕ проверены на живом рабочем столе — возможны ошибки. Если что-то не работает, сообщите в репозитории.
+
+TESTING SCOPE (EN): Package testing was performed in WSL (Linux on Windows), not on a real installation on bare metal. The GUI menu and notifications are tested logically but have NOT been verified on a live desktop — issues are possible. If something does not work, please report it in the repository.
 
 %prep
 
