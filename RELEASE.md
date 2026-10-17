@@ -167,7 +167,7 @@ git status --short ; echo ---tracked--- ; git ls-files | grep -E '(^|/)(config\.
 **B. Личные пути и имя пользователя в содержимом:**
 
 ```
-git ls-files -z | xargs -0 grep -nIE '[A-Za-z]:\\(Users|Temp|Projects|Desktop)|\\\\[A-Za-z0-9._-]+\\[A-Za-z0-9._$-]+|\\games\\'
+git ls-files -z | xargs -0 grep -nIE '[A-Za-z]:\\(Users|Temp|Projects|Desktop)|\\\\[A-Za-z0-9._-]+\\[A-Za-z0-9._$-]+|\\[A-Za-z0-9._-]+\\'
 ```
 
 Ожидаемо: **пусто** (ни `C:\Users\...`, ни сетевых шар вида `\\сервер\шара`, ни

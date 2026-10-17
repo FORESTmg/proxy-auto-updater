@@ -1,7 +1,7 @@
-# Доказательства для Windows — сборка 1.3.0 (живой ПК FOREST-PC)
+# Доказательства для Windows — сборка 1.3.0 (живой ПК <PC-NAME>)
 
-Дата: 17.10.2026. Машина: FOREST-PC, Windows 11, Ethernet 192.168.0.92.
-Проверялось на живой установке `C:\Users\games\AppData\Local\ForestProxyUpdater`.
+Дата: 17.10.2026. Машина: <PC-NAME>, Windows 11, Ethernet <LAN-IP>.
+Проверялось на живой установке `C:\Users\<user>\AppData\Local\ForestProxyUpdater`.
 
 ## 0. Что было сломано
 
@@ -104,9 +104,9 @@ ProcessId ParentProcessId Name                     start
 
 ```
 127.0.0.1:10808     http://www.gstatic.com/generate_204 -> 204 0.111s
-192.168.0.92:10808  http://www.gstatic.com/generate_204 -> 204 0.127s
+<LAN-IP>:10808  http://www.gstatic.com/generate_204 -> 204 0.127s
 127.0.0.1:10808     http://cp.cloudflare.com/generate_204 -> 204 0.149s
-192.168.0.92:10808  http://cp.cloudflare.com/generate_204 -> 204 0.153s
+<LAN-IP>:10808  http://cp.cloudflare.com/generate_204 -> 204 0.153s
 ```
 
 ## 6. Трей: файл состояния свежий, содержит «РФ напрямую»

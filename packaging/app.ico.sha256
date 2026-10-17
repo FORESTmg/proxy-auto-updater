@@ -1,7 +1,7 @@
 # SHA256 иконки приложения packaging/app.ico — РИСУНОК ПОЛЬЗОВАТЕЛЯ.
 #
 # Это НЕ сгенерированная make_icon.py картинка: файл собран из
-# C:\Users\games\Pictures\FOREST's_Proxy_auto-updater.png (1024x1024, RGBA)
+# C:\Users\<user>\Pictures\FOREST's_Proxy_auto-updater.png (1024x1024, RGBA)
 # в многоразмерный .ico (16/24/32/48/64/128/256).
 #
 # Зачем файл: сборка (build.ps1) сверяет хеш и ГРОМКО предупреждает, если
