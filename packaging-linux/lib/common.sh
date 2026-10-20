@@ -20,7 +20,7 @@ REPO_DIR="$(dirname "$PACKAGING_LINUX_DIR")"
 
 # ── версия и имена ──────────────────────────────────────────────────────────
 APP=forest-proxy-updater
-VERSION="${FOREST_PKG_VERSION:-1.3.0}"
+VERSION="${FOREST_PKG_VERSION:-1.3.1}"
 RELEASE="${FOREST_PKG_RELEASE:-1}"          # номер выпуска пакета (.rpm/.pkg)
 SUMMARY="Auto-updating proxy supervisor built on top of the Xray core"
 HOMEPAGE="https://github.com/FORESTmg/proxy-auto-updater"

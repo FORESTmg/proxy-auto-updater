@@ -47,6 +47,14 @@ AUTO_TAG = "[AUTO] "
 PROBE_URL = "https://www.gstatic.com/generate_204"
 PROBE_URL_ALT = "https://cp.cloudflare.com/generate_204"
 YOUTUBE_URL = "https://www.youtube.com/"
+# Зонд ЗДОРОВЬЯ узлов для балансировщика (observatory). НЕ gstatic: часть узлов
+# (типично российские выходы) спокойно отдаёт google/gstatic 204, но рвёт TLS к
+# youtube.com — leastPing выбирал именно их, и YouTube падал мгновенно (rc=35,
+# ~40 мс). Эндпоинт youtube/generate_204 отдаёт 204 на здоровом узле и рвётся на
+# «глушителе» YouTube, поэтому балансировщик такие узлы не берёт. Любой ответ
+# (даже 404) считается живым — только транспортная ошибка/TLS-сброс делают узел
+# мёртвым, так что вырождение эндпоинта не ломает связь.
+PROBE_URL_YT = "https://www.youtube.com/generate_204"
 PROBE_DATA_URL = "https://speed.cloudflare.com/__down?bytes=200000"
 PROBE_DATA_MIN_BYTES = 50000
 
@@ -566,7 +574,7 @@ def _fields_from_err(err) -> set:
     return out
 
 
-def _build_routing(ru_direct: bool) -> dict:
+def _build_routing(ru_direct: bool, strategy: dict = None) -> dict:
     """Правила: локальные имена и РФ — напрямую, остальное — через пул."""
     rules = [{"type": "field", "outboundTag": "direct",
               "domain": LOCAL_DIRECT_DOMAINS},
@@ -581,7 +589,7 @@ def _build_routing(ru_direct: bool) -> dict:
     return {
         "domainStrategy": "IPIfNonMatch",
         "balancers": [{"tag": "bal", "selector": ["proxy-out"],
-                       "strategy": {"type": "leastPing"}}],
+                       "strategy": strategy or {"type": "leastPing"}}],
         "rules": rules,
     }
 
@@ -603,9 +611,82 @@ def _build_dns(ru_direct: bool) -> dict:
     }
 
 
+def balancer_probe_url(cfg: dict) -> str:
+    """Зонд здоровья балансировщика из настроек (по умолчанию — YouTube)."""
+    try:
+        u = str((cfg.get("watch") or {}).get("balancer_probe_url") or "").strip()
+        return u or PROBE_URL_YT
+    except Exception:
+        return PROBE_URL_YT
+
+
+def balancer_strategy(cfg: dict) -> dict:
+    """Стратегия балансировщика из настроек.
+
+    ``leastLoad`` + ``burstObservatory``: нода, начавшая тормозить/отваливаться,
+    выпадает из ротации по числу неудач проб и по ``maxRTT`` — а не остаётся
+    «живой» по одному удачному медленному зонду (как с ``leastPing``: нода с
+    ответом пробы за 5 с считалась здоровой, и браузер на неё вис). Стратегия
+    задаётся настройкой ``watch.balancer_strategy`` — откат на ``leastPing`` без
+    пересборки.
+    """
+    try:
+        w = cfg.get("watch") or {}
+        s = str(w.get("balancer_strategy") or "leastLoad").strip()
+        if s not in ("leastPing", "leastLoad", "random"):
+            s = "leastLoad"
+        st = {"type": s}
+        if s == "leastLoad":
+            settings = {}
+            try:
+                mrtt = float(w.get("balancer_max_rtt_ms", 1500) or 0)
+            except Exception:
+                mrtt = 1500.0
+            if mrtt > 0:
+                settings["maxRTT"] = f"{int(mrtt)}ms"
+            try:
+                settings["expected"] = max(1, int(w.get("balancer_expected", 2) or 2))
+            except Exception:
+                settings["expected"] = 2
+            st["settings"] = settings
+        return st
+    except Exception:
+        return {"type": "leastPing"}
+
+
+def burst_observatory(cfg: dict, probe_url: str) -> dict:
+    """burstObservatory: ЧАСТЫЕ пробы с КОРОТКИМ таймаутом — быстрый failover.
+
+    Обычный observatory только «жив/мёртв»; burst измеряет задержку и число
+    неудач на несколько проб, поэтому тормозящая нода уходит из ротации за
+    секунды, а не через минуты.
+    """
+    try:
+        w = cfg.get("watch") or {}
+        tmo = str(w.get("balancer_burst_timeout_s", 3) or 3).rstrip("s") + "s"
+        itv = str(w.get("balancer_burst_interval_s", 15) or 15).rstrip("s") + "s"
+        try:
+            samp = max(1, int(w.get("balancer_burst_sampling", 3) or 3))
+        except Exception:
+            samp = 3
+    except Exception:
+        tmo, itv, samp = "3s", "15s", 3
+    return {
+        "subjectSelector": ["proxy-out"],
+        "pingConfig": {
+            "destination": probe_url,
+            "connectivity": probe_url,
+            "interval": itv,
+            "sampling": samp,
+            "timeout": tmo,
+        },
+    }
+
+
 def build_balancer_config(servers: list, port: int, listen: str = "127.0.0.1",
                           probe_url: str = None, ru_direct: bool = None,
-                          torrent_port: int = DEFAULT_TORRENT_PORT) -> dict:
+                          torrent_port: int = DEFAULT_TORRENT_PORT,
+                          strategy: dict = None, burst: dict = None) -> dict:
     """Конфиг ОДНОГО ядра с пулом серверов и нативным балансировщиком xray.
 
     xray сам следит за живостью узлов (observatory) и направляет новые
@@ -647,11 +728,17 @@ def build_balancer_config(servers: list, port: int, listen: str = "127.0.0.1",
         "dns": _build_dns(ru_direct),
         "observatory": {
             "subjectSelector": ["proxy-out"],
-            "probeUrl": probe_url or PROBE_URL,
+            "probeUrl": probe_url or PROBE_URL_YT,
             "probeInterval": "5s",
             "enableConcurrency": True,
         },
-        "routing": _build_routing(ru_direct),
+        "burstObservatory": burst or {
+            "subjectSelector": ["proxy-out"],
+            "pingConfig": {"destination": probe_url or PROBE_URL_YT,
+                           "connectivity": probe_url or PROBE_URL_YT,
+                           "interval": "15s", "sampling": 3, "timeout": "3s"},
+        },
+        "routing": _build_routing(ru_direct, strategy=strategy),
     }
 
 
@@ -1472,7 +1559,10 @@ def _emergency_restore(client: dict, cfg: dict, port: int) -> bool:
             ru_direct=ru_direct_enabled(cfg),
             torrent_port=int(client.get("torrent_port",
                                         cfg.get("client", {}).get(
-                                            "torrent_port", DEFAULT_TORRENT_PORT))))
+                                            "torrent_port", DEFAULT_TORRENT_PORT))),
+            probe_url=balancer_probe_url(cfg),
+            strategy=balancer_strategy(cfg),
+            burst=burst_observatory(cfg, balancer_probe_url(cfg)))
         if conf is None:
             lg.error("аварийный конфиг: пул пуст после сборки")
             return False
@@ -1559,14 +1649,545 @@ def write_balancer_config(client: dict, servers: list, cfg: dict) -> bool:
                            cfg.get("client", {}).get("torrent_port", DEFAULT_TORRENT_PORT)))
     ru = ru_direct_enabled(cfg)
     conf = build_balancer_config(servers, port, listen=listen, ru_direct=ru,
-                                 torrent_port=tport)
+                                 torrent_port=tport,
+                                 probe_url=balancer_probe_url(cfg),
+                                 strategy=balancer_strategy(cfg),
+                                 burst=burst_observatory(cfg, balancer_probe_url(cfg)))
     if conf is None:
         log.get_logger().error("write_balancer_config: пул пуст")
         return False
     return _write_json(client.get("cfg"), conf)
 
 
+# ══════════════════════ параллельная проверка ЖИВОГО пула ══════════════
+# Одиночная проба раз в 10-45 с НЕ воспроизводит браузер: он открывает десятки
+# соединений параллельно. Отказы на живом пуле приходили ПАЧКАМИ (6 за один
+# раунд на разных сайтах) — значит часть соединений балансировщик отдавал узлу,
+# который рвёт TLS-рукопожатие. Проверять пул нужно так же, как его использует
+# браузер: 8-16 одновременных запросов к РАЗНЫМ сайтам.
+PARALLEL_URLS = [
+    "https://www.youtube.com/",
+    "https://i.ytimg.com/generate_204",
+    "https://www.gstatic.com/generate_204",
+    "https://ru.wikipedia.org/",
+    "https://example.com/",
+    "https://github.com/",
+    "https://www.cloudflare.com/",
+]
+
+# Заведомо МЕДЛЕННЫЕ адреса. github.com через бесплатные узлы стабильно отвечает
+# 5-6 с (код 000, curl rc=28) — это свойство сайта/маршрута, а НЕ признак
+# плохого узла. Раньше такой ответ считался «сбросом TLS» и каждые 30-40 с
+# запускал переотбор пула (~90 раз за сутки) при полностью живой связи.
+SLOW_URLS = ["github.com"]
+
+# «Сброс» — только БЫСТРЫЙ отказ транспорта. Ответ 000 за 6 с по таймауту — это
+# стопор/медленный сайт, а не узел, рвущий рукопожатие.
+RESET_FAST_MS = 1500
+
+
+def _slow_hosts(cfg: dict = None) -> list:
+    try:
+        u = list(((cfg or {}).get("watch") or {}).get("burst_slow_urls") or [])
+    except Exception:
+        u = []
+    return [str(x).strip().lower().lstrip(".") for x in (u or SLOW_URLS) if str(x).strip()]
+
+
+def _is_slow_host(host: str, slow: list) -> bool:
+    h = (host or "").lower()
+    return any(h == s or h.endswith("." + s) for s in (slow or []))
+
+
+def _parallel_urls(cfg: dict = None) -> list:
+    try:
+        u = list(((cfg or {}).get("watch") or {}).get("burst_urls") or [])
+        return u or list(PARALLEL_URLS)
+    except Exception:
+        return list(PARALLEL_URLS)
+
+
+def _curl_live(port: int, url: str, timeout: float) -> dict:
+    """Один запрос ЧЕРЕЗ живой порт: код, время, TLS-verify, подпись ошибки."""
+    t0 = time.time()
+    cmd = ["curl", "-s", "-S", "-o", os.devnull, "-m", f"{float(timeout):.1f}",
+           "-x", f"http://127.0.0.1:{int(port)}",
+           "-w", "%{http_code}|%{time_total}|%{ssl_verify_result}", url]
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout + 4,
+                           creationflags=_no_window())
+        out = r.stdout.decode("utf-8", "replace").strip().split("|")
+        code = out[0] if out and out[0].isdigit() else "000"
+        tt = float(out[1]) if len(out) > 1 else 999.0
+        sslv = int(float(out[2])) if len(out) > 2 and out[2] else 1
+        return {"url": url, "code": code, "ms": int((time.time() - t0) * 1000),
+                "tt": tt, "ssl": sslv, "rc": r.returncode,
+                "err": r.stderr.decode("utf-8", "replace").strip()[:140]}
+    except Exception as e:
+        return {"url": url, "code": "000", "ms": int((time.time() - t0) * 1000),
+                "tt": 999.0, "ssl": 1, "rc": -1, "err": str(e)[:140]}
+
+
+def parallel_probe(client: dict, cfg: dict, rounds: int = 2,
+                   per_round: int = 16, timeout: float = None,
+                   stall_s: float = None) -> dict:
+    """Параллельная проба ЖИВОГО пула (как браузер). Возвращает статистику.
+
+    Отказ делим на ДВЕ РАЗНЫЕ категории — от этого зависит, трогаем ли пул:
+
+    * ``reset`` — быстрый отказ транспорта (``rc=35``/``rc=56`` или ``000``
+      быстрее :data:`RESET_FAST_MS`): узел рвёт рукопожатие. Повод для переотбора;
+    * ``stall`` — таймаут/медленный ответ. Сам по себе не говорит, что виноват
+      узел: медленным может быть сайт или маршрут. Стопоры на адресах из
+      ``SLOW_URLS`` (github.com) в триггер НЕ идут вовсе, а обычные — только
+      если стопорят ДВА РАЗНЫХ домена (один медленный сайт пул не рвёт).
+    """
+    import concurrent.futures as cf
+    port = int(client.get("socks_port", DEFAULT_SOCKS_PORT))
+    urls = _parallel_urls(cfg)
+    tc = cfg.get("test") or {}
+    w = cfg.get("watch") or {}
+    if stall_s is None:
+        stall_s = float(w.get("burst_stall_s") or tc.get("hard_stall_s", 5) or 5)
+    if timeout is None:
+        timeout = float(w.get("burst_probe_timeout_s")
+                        or max(6.0, stall_s + 1))
+    stall_s = max(1.0, float(stall_s))
+    # Медленным адресам — свой, заведомо больший порог: успеть ответить за 10-15 с
+    # и НЕ считаться ни отказом, ни стопором.
+    slow_limit = float(w.get("burst_slow_stall_s", 15) or 15)
+    slow_limit = max(stall_s + 1.0, slow_limit)
+    slow_hosts = _slow_hosts(cfg)
+    per_round = max(2, int(per_round))
+    rounds = max(1, int(rounds))
+
+    def _tmo(u):
+        host = u.split("/")[2]
+        return slow_limit + 1.0 if _is_slow_host(host, slow_hosts) else timeout
+
+    rows, bad, slow, total, points = [], 0, 0, 0, []
+    reset_n, stall_n, site_slow = 0, 0, 0
+    reset_hosts, stall_hosts = set(), set()
+    for _r in range(rounds):
+        tasks = [urls[i % len(urls)] for i in range(per_round)]
+        t0 = time.time()
+        with cf.ThreadPoolExecutor(max_workers=min(16, len(tasks))) as ex:
+            res = list(ex.map(lambda u: _curl_live(port, u, _tmo(u)), tasks))
+        rb = rs = 0
+        for r in res:
+            total += 1
+            host = r["url"].split("/")[2]
+            slow_host = _is_slow_host(host, slow_hosts)
+            # СБРОС: только быстрый транспортный отказ. Долгий 000 (rc=28) —
+            # это таймаут, а не сброс рукопожатия.
+            is_reset = (r["rc"] in (35, 56)
+                        or (r["code"] in ("000", "") and r["ms"] <= RESET_FAST_MS))
+            # На ЗАВЕДОМО МЕДЛЕННОМ адресе (github.com) медленный отказ — тоже
+            # его собственное свойство: 19 с и «Recv failure» там видели при
+            # полностью живой связи. Виновником узла это не считается.
+            if slow_host and r["ms"] > RESET_FAST_MS:
+                is_reset = False
+            lim_s = slow_limit if slow_host else stall_s
+            is_stall = (not is_reset) and (
+                (r["rc"] == 28 and r["ms"] >= lim_s * 1000 * 0.8)
+                or r["ms"] >= lim_s * 1000)
+            if is_reset:
+                reset_n += 1
+                reset_hosts.add(host)
+            if is_stall:
+                stall_n += 1
+                if slow_host:
+                    site_slow += 1     # github.com и подобные — не вина узла
+                else:
+                    stall_hosts.add(host)
+            is_bad = is_reset or is_stall
+            is_slow = (not is_bad) and r["ms"] > lim_s * 1000 * 0.8
+            if is_bad and not (is_stall and slow_host):
+                bad += 1
+                rb += 1
+                rows.append(f"{host} код={r['code']} {r['ms']}мс rc={r['rc']} "
+                            f"{r['err'][:100]}")
+            elif is_slow:
+                slow += 1
+                rs += 1
+        points.append({"round_ms": int((time.time() - t0) * 1000),
+                       "bad": rb, "slow": rs})
+    return {"bad": bad, "slow": slow, "total": total, "rows": rows,
+            "points": points, "reset": reset_n, "stall": stall_n,
+            "reset_hosts": sorted(reset_hosts), "stall_hosts": sorted(stall_hosts),
+            "site_slow": site_slow, "slow_hosts": list(slow_hosts),
+            "burst": bad > 0}
+
+
+def burst_trigger(res: dict) -> bool:
+    """Пора ли переотбирать пул.
+
+    Только: (1) СБРОС TLS хотя бы на одном запросе, либо (2) стопоры на ДВУХ
+    РАЗНЫХ доменах (одиночный медленный сайт — не повод рвать пул). Стопоры на
+    заведомо медленных адресах (``SLOW_URLS``) не считаются вообще.
+    """
+    if not res:
+        return False
+    if res.get("reset", 0) > 0:
+        return True
+    return len(res.get("stall_hosts") or ()) >= 2
+
+
+def _bl_has(bl: dict, s) -> bool:
+    """Узел в чёрном списке? Ключи: IndexId и ``address:port``."""
+    if not bl:
+        return False
+    for k in (getattr(s, "_row_index_id", None), getattr(s, "index_id", None),
+              f"{getattr(s, 'address', '')}:{getattr(s, 'port', '')}"):
+        if k and str(k) in bl:
+            return True
+    return False
+
+
+def _tls_map(cfg: dict, ttl_s: float = 21600.0, full: bool = False) -> dict:
+    """Свежие результаты TLS-гейта по узлам: ``{addr:port: ok_bool}``.
+
+    ``full=True`` — полные записи ``{ok, ts, why}`` (нужны, чтобы отличать
+    «узел рвёт TLS» от «узел просто медленный»: второе не повод выкидывать).
+    """
+    try:
+        import xraytest as XT
+        p = XT.tls_store_path(cfg)
+        with open(p, encoding="utf-8") as f:
+            data = json.load(f) or {}
+        now = time.time()
+        rec = {k: v for k, v in data.items()
+               if isinstance(v, dict) and now - float(v.get("ts", 0) or 0) <= ttl_s}
+        return rec if full else {k: bool(v.get("ok")) for k, v in rec.items()}
+    except Exception:
+        return {}
+
+
+# Причины брака TLS, которые НЕ доказывают плохой узел: он медленный, а не
+# рвущий рукопожатие. Такие узлы годятся для добора пула до пола.
+SOFT_TLS_PREFIXES = ("tls_slow_", "tls_ok_slow", "gate_slow_", "slow_")
+
+
+def _soft_why(why: str) -> bool:
+    return str(why or "").startswith(SOFT_TLS_PREFIXES)
+
+
+def attribute_bad_nodes(client: dict, cfg: dict, pool: list) -> list:
+    """Проверяет КАЖДЫЙ узел пула отдельным тестовым ядром (TLS-гейт).
+
+    Это и есть «немедленный переотбор»: после пачки отказов мы не ждём
+    плановой проверки и не баним весь пул, а находим КОНКРЕТНЫЕ узлы, которые
+    не проходят рукопожатие, и исключаем только их.
+
+    МЕДЛЕННЫЙ узел бракуется только как ЯВНЫЙ ВЫБРОС относительно медианы по
+    пулу (``test.tls_slow_factor``/``tls_slow_margin_s``). Раньше абсолютный
+    порог 2.5 с выкидывал узлы за 2.8-3.1 с, хотя весь пул в этот момент был
+    медленным, — пул съёживался 10 → 5 → 3 → 2 с разрывом связи на каждой
+    пересборке.
+    """
+    import concurrent.futures as cf
+    import statistics
+    import xraytest as XT
+    lg = log.get_logger()
+    if not pool:
+        return []
+    tc = cfg.get("test") or {}
+    urls = list(tc.get("tls_urls") or [])
+    if not urls:
+        return []
+    max_s = float(tc.get("tls_max_s", 3.0) or 3.0)
+    hard_s = float(tc.get("tls_hard_s", 0) or 0) or max(10.0, max_s * 3.0)
+    min_ok = int(tc.get("tls_min_ok", 2) or 2)
+    factor = float(tc.get("tls_slow_factor", 1.8) or 1.8)
+    margin = float(tc.get("tls_slow_margin_s", 1.0) or 0.0)
+    start = int(tc.get("port_start", 10810))
+    ports = XT.PortPool(start, max(10, len(pool) * 2 + 4))
+
+    def _one(s):
+        port = ports.acquire()
+        inst = None
+        try:
+            ob = XT.outbound_json(s)
+            if ob is None:
+                return (s, None, "unsupported")
+            inst = XT.TestInstance(client["core"], port, ob)
+            if not inst.start():
+                return (s, None, "core_start_failed")   # не вина узла
+            rows = XT.tls_measure(port, urls=urls, timeout=hard_s + 1.0)
+            ev = XT.tls_evaluate(rows, max_s=max_s, min_ok=min_ok, hard_s=hard_s)
+            return (s, ev, None)
+        except Exception as e:
+            return (s, None, f"exception:{e}")          # ошибку теста не баним
+        finally:
+            if inst:
+                inst.stop()
+            ports.release(port)
+
+    out = []
+    workers = max(2, min(8, len(pool)))
+    with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = [ex.submit(_one, s) for s in pool]
+        for f in cf.as_completed(futs):
+            try:
+                out.append(f.result())
+            except Exception:
+                pass
+    hard_bad = [(s, err or ev["why"])
+                for (s, ev, err) in out
+                if err or (ev and not ev["ok"] and ev["kind"] != "slow")]
+    soft = [(s, ev) for (s, ev, err) in out
+            if ev and not ev["ok"] and ev["kind"] == "slow"]
+    vals = [ev["worst_s"] for (_s, ev, _e) in out
+            if ev and ev["worst_s"] and ev["kind"] in ("ok", "slow")]
+    med = float(statistics.median(vals)) if vals else 0.0
+    tol = max(med * factor, med + margin) if med else 0.0
+    bad, rescued = list(hard_bad), []
+    for s, ev in soft:
+        worst = float(ev.get("worst_s") or 0)
+        if tol and worst <= tol:
+            # Медленный, но в общей картине пула — НЕ виновник.
+            rescued.append(s)
+            with_level = "tls_ok_slow_median"
+            try:
+                XT.tls_record(cfg, s, True, with_level)
+            except Exception:
+                pass
+            continue
+        bad.append((s, f"tls_slow_outlier_{worst:.1f}s_{ev.get('slow_host') or '?'}"))
+    for (s, ev, err) in out:
+        if err or ev is None:
+            continue
+        if ev["ok"]:
+            try:
+                XT.tls_record(cfg, s, True, ev["why"] or "ok")
+            except Exception:
+                pass
+    lg.info(f"Переотбор узлов: проверено {len(out)}, брак {len(bad)}"
+            + (f" (жёстких {len(hard_bad)}, медленных-выбросов "
+               f"{len(bad) - len(hard_bad)})" if bad else "")
+            + (f"; медиана TLS {med:.2f} с, порог выброса {tol:.2f} с" if med else "")
+            + (f"; прощено медленных (в общей картине): {len(rescued)}"
+               if rescued else "")
+            + (f" [{', '.join(w for _s, w in bad[:6])}]" if bad else ""))
+    return bad
+
+
+def ban_bad_nodes(cfg: dict, bad: list, minutes: float = 30.0) -> int:
+    """Банит узлы, не прошедшие TLS-гейт (по IndexId И по address:port)."""
+    n = 0
+    for s, why in bad or []:
+        key = getattr(s, "_row_index_id", None) or getattr(s, "index_id", None)
+        if key:
+            bl_add(cfg, key, minutes=minutes, why=str(why)[:60])
+        if getattr(s, "address", ""):
+            bl_add(cfg, f"{s.address}:{s.port}", minutes=minutes,
+                   why=str(why)[:60])
+        n += 1
+    return n
+
+
+def post_validate_pool(client: dict, cfg: dict, pool: list = None,
+                       rounds: int = None, per_round: int = 16) -> dict:
+    """Проверка пула СРАЗУ после применения: 16 параллельных × 2-3 раунда.
+
+    Возвращает ``{ok, bad, banned, res}``. Если отказы есть — находит виновника
+    отдельными тестовыми ядрами и банит ТОЛЬКО его (вызывающий пересобирает пул
+    без перезапуска по расписанию).
+    """
+    lg = log.get_logger()
+    port = int(client.get("socks_port", DEFAULT_SOCKS_PORT))
+    if proxy_off(cfg) or not port_listening(port, 0.5):
+        return {"ok": False, "bad": 0, "banned": [], "res": None,
+                "skipped": "no_core"}
+    w = cfg.get("watch") or {}
+    try:
+        rounds = int(rounds if rounds is not None
+                     else (w.get("post_validate_rounds", 2) or 2))
+    except Exception:
+        rounds = 2
+    timeout = float(w.get("burst_probe_timeout_s", 6) or 6)
+    stall = float(w.get("burst_stall_s", 5) or 5)
+    res = parallel_probe(client, cfg, rounds=rounds,
+                         per_round=int(per_round), timeout=timeout, stall_s=stall)
+    if not burst_trigger(res):
+        if res["bad"]:
+            lg.warn(f"Пост-валидация: {res['bad']} стопор(ов) из {res['total']} "
+                    f"(одиночный — не повод рвать пул): {res['rows'][:2]}")
+        return {"ok": True, "bad": res["bad"], "banned": [], "res": res}
+    lg.warn(f"Пост-валидация пула: сбросов TLS {res['reset']}, доменов со "
+            f"стопором {len(res.get('stall_hosts') or [])} из {res['total']} — "
+            f"ищу виновника ({res['rows'][:3]})")
+    pl = pool if pool is not None else balancer_pool(
+        client, cfg, n=int(w.get("balancer_pool_n", 10) or 10))
+    bad = attribute_bad_nodes(client, cfg, pl)
+    if not bad:
+        # Узлы пула целы: причина вне пула (сайт/маршрут). Ставим паузу, чтобы
+        # сторож не запускал ту же атрибуцию каждые 30-40 с.
+        secs = _burst_backoff_bump(cfg, "пост-валидация: виновник не в пуле")
+        lg.warn(f"Пост-валидация: виновник не в пуле — пауза "
+                f"{max(1, secs // 60)} мин, пул не трогаю")
+        return {"ok": res["bad"] == 0, "bad": res["bad"], "banned": [], "res": res}
+    banned = ban_bad_nodes(cfg, bad, minutes=float(w.get("ban_bad_minutes", 30) or 30))
+    if banned:
+        lg.warn(f"Пост-валидация: исключено узлов {banned} — пул будет пересобран")
+    return {"ok": res["bad"] == 0, "bad": res["bad"], "banned": bad, "res": res}
+
+
+def cycle_running(cfg: dict, stale_s: float = 1800.0) -> bool:
+    """Идёт ли ПОЛНЫЙ цикл обновления (по замку цикла).
+
+    Периодическую параллельную пробу в это время не гоняем: цикл уже поднимает
+    десятки тестовых ядер и грузит CPU, и любая проба покажет отказы от
+    конкуренции за процессор, а не от плохих узлов (реальный источник ложных
+    «ударов» в проекте). Пост-валидация после применения пула НЕ пропускается —
+    она идёт сразу за подъёмом ядра.
+    """
+    try:
+        p = os.path.join(cfg["paths"]["state_dir"], "lock.json")
+        with open(p, encoding="utf-8") as f:
+            d = json.load(f)
+        return (time.time() - float(d.get("ts", 0) or 0)) < stale_s
+    except Exception:
+        return False
+
+
+def _burst_backoff(cfg: dict) -> tuple:
+    """Текущая пауза сторожа: ``(until_ts, step)``. step=0 — паузы нет."""
+    try:
+        st = StateStore(cfg)
+        return (float(st.data.get("burst_backoff_until", 0) or 0),
+                int(st.data.get("burst_backoff_step", 0) or 0))
+    except Exception:
+        return 0.0, 0
+
+
+def _burst_backoff_bump(cfg: dict, reason: str = "") -> int:
+    """Увеличивает паузу: 5 → 10 → 20 → 30 мин (максимум 30). Возвращает секунды.
+
+    Нужна на случай «атрибуция не нашла виновника в пуле»: причина вне пула
+    (медленный сайт, маршрут, провайдер), и долбить переотбор каждые 30-40 с
+    бессмысленно — за сутки так набегало ~90 срабатываний при живой связи.
+    """
+    try:
+        st = StateStore(cfg)
+        steps = [int(x) for x in ((cfg.get("watch") or {}).get(
+            "burst_backoff_s") or [300, 600, 1200, 1800])]
+        steps = sorted(s for s in steps if s > 0) or [300, 600, 1200, 1800]
+        step = int(st.data.get("burst_backoff_step", 0) or 0)
+        secs = steps[min(step, len(steps) - 1)]
+        st.data["burst_backoff_step"] = step + 1
+        st.data["burst_backoff_until"] = time.time() + secs
+        st.data["burst_backoff_reason"] = str(reason or "")[:120]
+        st.data["burst_backoff_ts"] = time.time()
+        st.save()
+        return secs
+    except Exception:
+        return 0
+
+
+def _burst_backoff_clear(cfg: dict) -> None:
+    """Сбрасывает паузу после чистой пробы (связь в порядке)."""
+    try:
+        st = StateStore(cfg)
+        if st.data.get("burst_backoff_step") or st.data.get("burst_backoff_until"):
+            st.data["burst_backoff_step"] = 0
+            st.data["burst_backoff_until"] = 0
+            st.data["burst_backoff_reason"] = ""
+            st.save()
+    except Exception:
+        pass
+
+
+def burst_guard(client: dict, cfg: dict, n: int = 10) -> str:
+    """Периодическая параллельная проба + мгновенный переотбор по РЕАЛЬНОЙ причине.
+
+    Цель — окно деградации меньше 10 с: заметили пачку сбросов TLS, нашли узел,
+    сняли его и пересобрали пул, не дожидаясь плановой проверки. Медленный ответ
+    (в том числе github.com за 5-6 с) причиной переотбора НЕ является; если
+    атрибуция не нашла виновника в пуле — включается пауза 5/10/20/30 мин.
+    """
+    lg = log.get_logger()
+    w = cfg.get("watch") or {}
+    port = int(client.get("socks_port", DEFAULT_SOCKS_PORT))
+    if proxy_off(cfg):
+        return "skip"
+    if not port_listening(port, 0.5):
+        return "skip"            # смерть ядра — забота пульса, не этой пробы
+    if cycle_running(cfg):
+        return "cycle"           # идёт полный цикл: проба покажет конкуренцию за CPU
+    now = time.time()
+    until, step = _burst_backoff(cfg)
+    if until > now:
+        return "backoff"         # пауза после «виновник не в пуле» — молча
+    try:
+        cooldown = float(w.get("burst_cooldown_after_rebuild_s", 120) or 0)
+        last_rb = float(StateStore(cfg).data.get("burst_rebuild_ts", 0) or 0)
+        if cooldown > 0 and last_rb and (now - last_rb) < cooldown:
+            return "cooldown"    # только что пересобрали — не дёргаем пул снова
+    except Exception:
+        pass
+    res = parallel_probe(client, cfg, rounds=1,
+                         per_round=int(w.get("burst_probe_n", 12) or 12),
+                         timeout=float(w.get("burst_probe_timeout_s", 6) or 6),
+                         stall_s=float(w.get("burst_stall_s", 5) or 5))
+    if not burst_trigger(res):
+        if res["bad"]:
+            lg.warn(f"Параллельная проба: {res['bad']} отказ(ов) из "
+                    f"{res['total']}, но причины для переотбора нет "
+                    f"(сбросов {res['reset']}, доменов со стопором "
+                    f"{len(res.get('stall_hosts') or [])}) — пул не трогаю: "
+                    f"{res['rows'][:2]}")
+        if res.get("site_slow"):
+            lg.info(f"Параллельная проба: {res['site_slow']} медленных ответ(ов) "
+                    f"на заведомо медленные адреса "
+                    f"({', '.join(res.get('slow_hosts') or [])}) — не вина узлов")
+        if not res["bad"] and step:
+            _burst_backoff_clear(cfg)
+        return "ok"
+    lg.warn(f"Параллельная проба: сбросов TLS {res['reset']}, доменов со "
+            f"стопором {len(res.get('stall_hosts') or [])} "
+            f"({', '.join(res.get('stall_hosts') or []) or '—'}) из "
+            f"{res['total']} — переотбор ({res['rows'][:3]})")
+    pool = balancer_pool(client, cfg, n=int(w.get("balancer_pool_n", n) or n))
+    bad = attribute_bad_nodes(client, cfg, pool)
+    if not bad:
+        secs = _burst_backoff_bump(cfg, "виновник не в пуле")
+        when = time.strftime("%H:%M", time.localtime(time.time() + secs)) if secs else "?"
+        lg.warn(f"Переотбор: виновник не в пуле (узлы целы) — "
+                f"пауза {max(1, secs // 60)} мин до {when}, пул не трогаю")
+        return "burst_unattributed"
+    ban_bad_nodes(cfg, bad, minutes=float(w.get("ban_bad_minutes", 30) or 30))
+    ok = ensure_balancer(client, cfg, n=n, force=True, fast_ok=True,
+                         post_retry=True)
+    try:
+        st = StateStore(cfg)
+        st.data["burst_rebuild_ts"] = time.time()
+        st.save()
+    except Exception:
+        pass
+    _burst_backoff_clear(cfg)
+    lg.warn(f"Переотбор: снято {len(bad)}, пул пересобран — "
+            f"{'связь OK' if ok else 'связи нет'}")
+    return f"rebuild_{len(bad)}" + ("_ok" if ok else "_fail")
+
+
 # ══════════════════════════════════════════ пул балансировщика ═══
+def _pool_floor(cfg: dict, n: int) -> int:
+    """Пол пула: ниже него состав не опускаем (0 = пол выключен).
+
+    Берётся из ``diversity.min_pool_after_cap`` (та же страховка, что в полном
+    цикле) либо ``watch.pool_floor``; больше целевого размера пула пол смысла
+    не имеет, поэтому ограничивается ``n``.
+    """
+    try:
+        div = cfg.get("diversity") or {}
+        floor = int(div.get("min_pool_after_cap", 0) or 0)
+        floor = int((cfg.get("watch") or {}).get("pool_floor", 0) or 0) or floor
+    except Exception:
+        floor = 0
+    return max(0, min(int(n or 0), floor))
+
+
 def balancer_pool(client: dict, cfg: dict, n: int = 10, min_speed_kbps: float = 0) -> list:
     """Топ-N серверов для пула: из hotcache, иначе из [AUTO]-стора.
 
@@ -1577,10 +2198,33 @@ def balancer_pool(client: dict, cfg: dict, n: int = 10, min_speed_kbps: float = 
     st = StateStore(cfg)
     pool = []
     seen = set()
+    bl = bl_active(cfg)
+    tls = _tls_map(cfg)
+    # TTL hotcache: записи старше срока НЕ используем — иначе давно протухший
+    # узел (или «глушитель» YouTube) живёт в пуле бесконечно. В реальном
+    # state.json запись-глушитель была возрастом 69 ч и всё равно бралась.
+    try:
+        hot_ttl = float(cfg.get("watch", {}).get("hotcache_ttl_s", 3600) or 0)
+    except Exception:
+        hot_ttl = 3600.0
+    now = time.time()
     for e in (st.data.get("hotcache") or []):
         if not e.get("speed_kbps"):
             continue
+        if hot_ttl > 0 and (now - float(e.get("ts", 0) or 0)) > hot_ttl:
+            continue
+        # Явно помеченный «YouTube не открывается» узел в пул не берём.
+        if e.get("youtube_ok") is False:
+            continue
         if min_speed_kbps and e["speed_kbps"] < min_speed_kbps:
+            continue
+        # Чёрный список проверяем И для hotcache: раньше бан обходился, потому
+        # что быстрый путь отдавал узел из кэша без проверки IndexId.
+        if bl and (str(e.get("index_id") or "") in bl
+                   or f"{e.get('address','')}:{e.get('port','')}" in bl):
+            continue
+        # Узел, не прошедший TLS-рукопожатие к разным доменам, в пул не берём.
+        if tls.get(f"{e.get('address','')}:{e.get('port','')}") is False:
             continue
         s = _row_to_server_from_cache(e)
         if s is not None and s.address and s.port and (s.password or "").strip() \
@@ -1601,6 +2245,8 @@ def balancer_pool(client: dict, cfg: dict, n: int = 10, min_speed_kbps: float = 
         s._row_index_id = str(r.get("IndexId"))
         if (s.address, s.port) in seen:
             continue
+        if _bl_has(bl, s):
+            continue
         if (s.speed_kbps or 0) <= 0:
             continue
         if min_speed_kbps and (s.speed_kbps or 0) < min_speed_kbps:
@@ -1610,12 +2256,109 @@ def balancer_pool(client: dict, cfg: dict, n: int = 10, min_speed_kbps: float = 
                 continue
         except Exception:
             pass
+        if tls.get(f"{s.address}:{s.port}") is False:
+            continue
         seen.add((s.address, s.port))
         pool.append(s)
         if len(pool) >= n:
             break
-    pool.sort(key=lambda s: -(s.speed_kbps or 0))
-    return pool[:n]
+    # Подтверждённые мульти-доменным TLS-гейтом узлы идут первыми: скорость
+    # важна, но узел, рвущий рукопожатие, не должен попасть в пул даже быстрым.
+    pool.sort(key=lambda s: (0 if tls.get(f"{s.address}:{s.port}") is True else 1,
+                             -(s.speed_kbps or 0)))
+    # ── ПОЛ ПУЛА ────────────────────────────────────────────────────────────
+    # diversity.min_pool_after_cap раньше действовал ТОЛЬКО в полном цикле, а
+    # пул балансировщика собирался без пола: после каждого переотбора он
+    # съёживался 10 → 5 → 3 → 2, и каждая пересборка рвала связь на 250-330 мс.
+    # Теперь пул ниже пола добирается узлами, исключёнными ЛИШЬ за медленность
+    # (не за сброс TLS и не за заглушку), и каждая усадка пишется в лог WARN.
+    floor = _pool_floor(cfg, n)
+    prev_n = int(st.data.get("pool_size_last", 0) or 0)
+    rescued = []
+    try:
+        if floor and len(pool) < floor:
+            tlsf = _tls_map(cfg, full=True)
+
+            def _ap(s):
+                return f"{getattr(s, 'address', '')}:{getattr(s, 'port', '')}"
+
+            def _tls_soft(s):
+                rec = tlsf.get(_ap(s)) or {}
+                return bool(rec) and not rec.get("ok") and _soft_why(rec.get("why"))
+
+            def _tls_hard(s):
+                rec = tlsf.get(_ap(s)) or {}
+                return bool(rec) and not rec.get("ok") and not _soft_why(rec.get("why"))
+
+            def _bl_soft(s):
+                for k in (getattr(s, "_row_index_id", None),
+                          getattr(s, "index_id", None), _ap(s)):
+                    rec = bl.get(str(k)) if k else None
+                    if rec and _soft_why(rec.get("why")):
+                        return True
+                return False
+
+            def _bl_hard(s):
+                for k in (getattr(s, "_row_index_id", None),
+                          getattr(s, "index_id", None), _ap(s)):
+                    rec = bl.get(str(k)) if k else None
+                    if rec and not _soft_why(rec.get("why")):
+                        return True
+                return False
+
+            def _usable(s):
+                return bool(s and s.address and s.port
+                            and (s.password or "").strip()
+                            and (s.speed_kbps or 0) > 0
+                            and (not min_speed_kbps
+                                 or (s.speed_kbps or 0) >= min_speed_kbps)
+                            and not _tls_hard(s) and not _bl_hard(s)
+                            and (_tls_soft(s) or _bl_soft(s)))
+
+            for e in (st.data.get("hotcache") or []):
+                if len(pool) >= floor:
+                    break
+                if not e.get("speed_kbps") or e.get("youtube_ok") is False:
+                    continue
+                if hot_ttl > 0 and (now - float(e.get("ts", 0) or 0)) > hot_ttl:
+                    continue
+                s = _row_to_server_from_cache(e)
+                if not s or (s.address, s.port) in seen or not _usable(s):
+                    continue
+                seen.add((s.address, s.port))
+                pool.append(s)
+                rescued.append(_ap(s))
+            for r in read_db_rows(client["db"]):
+                if len(pool) >= floor:
+                    break
+                if not (r.get("Remarks") or "").startswith(AUTO_TAG):
+                    continue
+                s = row_to_server(r)
+                if s is None:
+                    continue
+                s._row_index_id = str(r.get("IndexId"))
+                if (s.address, s.port) in seen or not _usable(s):
+                    continue
+                seen.add((s.address, s.port))
+                pool.append(s)
+                rescued.append(_ap(s))
+    except Exception as _e:
+        log.get_logger().warn(f"balancer_pool: добор до пола не удался: {_e}")
+    size = len(pool)
+    lg = log.get_logger()
+    if prev_n and size < prev_n:
+        lg.warn(f"ПУЛ УСАЖЕН: {prev_n} → {size} узлов (пол {floor or '—'}; "
+                f"добрано медленных {len(rescued)})")
+    elif floor and size < floor:
+        lg.warn(f"ПУЛ НИЖЕ ПОЛА: {size} < {floor} — подходящих узлов больше нет "
+                f"(медленные тоже исчерпаны), пересборка не поможет")
+    if size != prev_n:
+        try:
+            st.data["pool_size_last"] = size
+            st.save()
+        except Exception:
+            pass
+    return pool[:max(size, floor)] if floor else pool[:n]
 
 
 def _row_to_server_from_cache(e: dict):
@@ -1669,8 +2412,13 @@ def _link_ok(cfg: dict, port: int, fresh_s: float = 45.0) -> bool:
 
 
 def ensure_balancer(client: dict, cfg: dict, n: int = 10,
-                    force: bool = False, fast_ok: bool = False) -> bool:
-    """Поднимает пул серверов с балансировщиком xray. True — связь есть."""
+                    force: bool = False, fast_ok: bool = False,
+                    post_retry: bool = False) -> bool:
+    """Поднимает пул серверов с балансировщиком xray. True — связь есть.
+
+    ``post_retry`` — служебный флаг: пул уже пересобран после пост-валидации,
+    повторную проверку не запускаем (защита от петли пересборок).
+    """
     if _mode_of(client, cfg) == "v2rayn":
         return _v2().ensure_balancer(client, cfg, n=n, force=force, fast_ok=fast_ok)
     lg = log.get_logger()
@@ -1711,7 +2459,10 @@ def ensure_balancer(client: dict, cfg: dict, n: int = 10,
                                                      DEFAULT_TORRENT_PORT)))
     want_ru = ru_direct_enabled(cfg)
     conf = build_balancer_config(pool, port, listen=listen, ru_direct=want_ru,
-                                 torrent_port=tport)
+                                 torrent_port=tport,
+                                 probe_url=balancer_probe_url(cfg),
+                                 strategy=balancer_strategy(cfg),
+                                 burst=burst_observatory(cfg, balancer_probe_url(cfg)))
     if conf is None:
         lg.warn("ensure_balancer: пул пуст после сборки outbound'ов")
         return bool(link)
@@ -1797,6 +2548,36 @@ def ensure_balancer(client: dict, cfg: dict, n: int = 10,
         except Exception:
             extra = ""
         lg.info(f"Балансировщик поднят: {len(pool)} серверов (rtt={rtt} мс{extra})")
+        lg.info(f"ПУЛ ПРИМЕНЁН: {len(pool)} узлов, sha={cand_sha[:8]}{extra}")
+        # ПОСТ-ВАЛИДАЦИЯ СРАЗУ ПОСЛЕ ПРИМЕНЕНИЯ ПУЛА. Одиночная проба ловит
+        # «связь есть», но не ловит узел, который рвёт TLS на ЧАСТИ соединений:
+        # браузер открывает десятки параллельно, и часть уходит на него. Поэтому
+        # после подъёма/переключения гоняем те же 16 параллельных запросов и при
+        # отказах сразу ищем виновника и пересобираем пул — не ждём плановой
+        # проверки (окно деградации было 30-180 с).
+        if restarted and not post_retry and bool(
+                (cfg.get("watch") or {}).get("post_validate", 1)):
+            # Пауза на «прогрев» наблюдателя: сразу после старта ядра у leastLoad
+            # ещё нет замеров, и первые соединения могут уйти на узел, который
+            # burstObservatory через 2-4 с признает мёртвым. Без паузы первая же
+            # параллельная проба даёт ложные сбросы сразу после перезапуска.
+            try:
+                time.sleep(float((cfg.get("watch") or {}).get(
+                    "post_validate_delay_s", 3) or 0))
+            except Exception:
+                pass
+            try:
+                pv = post_validate_pool(client, cfg, pool=pool)
+                if pv.get("banned"):
+                    lg.warn("Пост-валидация: пул с мёртвыми узлами — пересобираю "
+                            "сразу, без ожидания расписания")
+                    return ensure_balancer(client, cfg, n=n, force=True,
+                                           fast_ok=True, post_retry=True)
+                if pv.get("ok"):
+                    lg.info("Пост-валидация: пул чист (0 отказов в параллельной "
+                            "пробе)")
+            except Exception as e:
+                lg.warn(f"Пост-валидация пула: {e}")
     else:
         lg.warn("ensure_balancer: связь не появилась")
     return ok
@@ -1805,12 +2586,13 @@ def ensure_balancer(client: dict, cfg: dict, n: int = 10,
 # ══════════════════════════════════════════ активация ═══
 def activate(client: dict, servers: list, active_id: str, cfg: dict,
              active_server=None, update_stats: bool = True, existing: list = None,
-             restart_client: bool = True) -> dict:
+             restart_client: bool = True, force_pool: bool = False) -> dict:
     """Полный цикл активации: запись стора -> конфиг -> запуск ядра -> проверка."""
     if _mode_of(client, cfg) == "v2rayn":
         return _v2().activate(client, servers, active_id, cfg,
                               active_server=active_server, update_stats=update_stats,
-                              existing=existing, restart_client=restart_client)
+                              existing=existing, restart_client=restart_client,
+                              force_pool=force_pool)
     lg = log.get_logger()
     switched = str(read_active_id(client["cfg"])) != str(active_id)
     try:
@@ -1822,11 +2604,13 @@ def activate(client: dict, servers: list, active_id: str, cfg: dict,
         return {"ok": False, "switched": switched, "rtt": 0, "msg": f"write_error: {e}"}
 
     if bool(cfg.get("watch", {}).get("balancer_mode", False)):
-        # force НЕ передаём: ensure_balancer сам решает, нужен ли перезапуск
-        # (состав пула/рабочий конфиг не изменились — ядро не трогаем).
+        # force_pool — только для ЯВНОГО запроса пользователя («Обновить
+        # серверы сейчас»): тогда свежий состав пула применяется сразу, не
+        # дожидаясь заморозки. При одинаковом конфиге перезапуска всё равно нет
+        # (ensure_balancer сверит sha конфига).
         if ensure_balancer(client, cfg,
                            n=int(cfg["watch"].get("balancer_pool_n", 10)),
-                           force=False):
+                           force=force_pool):
             ok2, rtt2 = probe_client(client, timeout=8)
             if ok2:
                 return {"ok": True, "switched": switched, "rtt": rtt2,
@@ -1986,10 +2770,34 @@ class StateStore:
                         data[k] = v
             except Exception:
                 pass
-        tmp = self.path + ".tmp"
+        tmp = self.path + ".tmp.%d" % os.getpid()
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=1)
-        os.replace(tmp, self.path)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+        # Запись состояния идёт из НЕСКОЛЬКИХ потоков супервизора (watch/guard/
+        # update). Общий путь ``state.json.tmp`` + ``os.replace`` давала гонку:
+        # «[WinError 5] Отказано в доступе: state.json.tmp -> state.json» (реальный
+        # случай 19.10.2026 — подпись пула/заморозка терялись). Пишем в свой
+        # временный файл и повторяем замену при занятости.
+        last = None
+        for attempt in range(6):
+            try:
+                os.replace(tmp, self.path)
+                last = None
+                break
+            except Exception as e:
+                last = e
+                time.sleep(0.05 * (attempt + 1))
+        if last is not None:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+            raise last
         self.data = data
 
 
@@ -2016,6 +2824,10 @@ def update_hotcache(client: dict, cfg: dict, servers: list):
             "remark": getattr(s, "remark", "") or "",
             "rtt_ms": s.rtt_ms, "speed_kbps": s.speed_kbps,
             "index_id": idx, "ts": time.time(),
+            # Признак «YouTube через узел открывается». У Server это поле
+            # динамическое и в asdict не попадает — храним отдельно, чтобы при
+            # сборке пула отсеять узлы-«глушители» YouTube.
+            "youtube_ok": getattr(s, "youtube_ok", None),
             "server": full,          # полные данные для быстрого восстановления
         })
     st.data["hotcache"] = cache

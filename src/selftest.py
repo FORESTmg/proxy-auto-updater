@@ -72,7 +72,9 @@ def main() -> int:
               "wait_and_probe", "balancer_pool", "server_to_row", "port_busy",
               "build_balancer_config", "geo_asset_dir", "ru_direct_enabled",
               "proxy_off", "set_proxy_off", "save_proxy_orig", "restore_system_proxy",
-              "start_core", "stop_core", "ensure_system_proxy", "write_bin_config"]
+              "start_core", "stop_core", "ensure_system_proxy", "write_bin_config",
+              "parallel_probe", "post_validate_pool", "attribute_bad_nodes",
+              "ban_bad_nodes", "burst_guard", "burst_trigger", "cycle_running", "bl_add"]
     for n in needed:
         check(f"есть {n}", hasattr(CW, n))
 
@@ -240,6 +242,30 @@ def main() -> int:
               "expectIPs" in json.dumps(ruconf.get("dns", {}), ensure_ascii=False))
         check("domainStrategy=IPIfNonMatch",
               ruconf["routing"].get("domainStrategy") == "IPIfNonMatch")
+        check("observatory балансировщика зондирует YouTube (не gstatic)",
+              "youtube" in str(ruconf.get("observatory", {}).get("probeUrl", "")).lower(),
+              str(ruconf.get("observatory", {}).get("probeUrl")))
+        check("balancer_probe_url: дефолт YouTube, переопределяется настройкой",
+              "youtube" in CW.balancer_probe_url({}).lower()
+              and CW.balancer_probe_url(
+                  {"watch": {"balancer_probe_url": "https://x/y"}}) == "https://x/y",
+              CW.balancer_probe_url({}))
+        check("есть YouTube-гейт узлов (XT.youtube_filter)",
+              callable(getattr(__import__("xraytest"), "youtube_filter", None)))
+        _st = CW.balancer_strategy({})
+        check("стратегия балансировщика — leastLoad с maxRTT (быстрый отсев нод)",
+              _st.get("type") == "leastLoad" and "maxRTT" in (_st.get("settings") or {}),
+              str(_st))
+        check("откат на leastPing — сменой настройки, без пересборки",
+              CW.balancer_strategy({"watch": {"balancer_strategy": "leastPing"}})
+              .get("type") == "leastPing")
+        _b = CW.burst_observatory({}, "https://x/y")
+        check("burstObservatory: короткий таймаут и частый интервал",
+              _b["pingConfig"]["timeout"] == "3s"
+              and _b["pingConfig"]["interval"] == "15s", str(_b.get("pingConfig")))
+        check("узел с медленным ответом гейта бракуется (порог из настроек)",
+              float(__import__("xraytest").GATE_MAX_S) > 0
+              and float(__import__("xraytest").YOUTUBE_MAX_TT) > 0)
     finally:
         if old_env is None:
             os.environ.pop("XRAY_LOCATION_ASSET", None)
@@ -287,7 +313,20 @@ def main() -> int:
     check("дефолт diversity.min_pool_after_cap=12", cfg2["diversity"]["min_pool_after_cap"] == 12)
     check("дефолт watch.ru_direct выключен", cfg2["watch"]["ru_direct"] is False)
     check("дефолт test.min_speed_kbps=1000", int(cfg2["test"]["min_speed_kbps"]) == 1000)
-    check("дефолт test.gate_urls пуст (без шлюза Cloudflare)", not cfg2["test"].get("gate_urls"))
+    check("дефолт test.gate_urls содержит YouTube-гейт (узлы-«глушители» не в пуле)",
+          any("youtube" in str(u).lower()
+              for u in (cfg2["test"].get("gate_urls") or [])),
+          str(cfg2["test"].get("gate_urls")))
+    check("дефолт watch.balancer_probe_url — YouTube, не gstatic",
+          "youtube" in str(cfg2["watch"].get("balancer_probe_url", "")).lower(),
+          str(cfg2["watch"].get("balancer_probe_url")))
+    check("дефолт watch.balancer_strategy=leastLoad",
+          str(cfg2["watch"].get("balancer_strategy")) == "leastLoad",
+          str(cfg2["watch"].get("balancer_strategy")))
+    check("дефолт test.gate_max_s/youtube_max_tt_s заданы",
+          float(cfg2["test"].get("gate_max_s", 0)) > 0
+          and float(cfg2["test"].get("youtube_max_tt_s", 0)) > 0,
+          f'{cfg2["test"].get("gate_max_s")}/{cfg2["test"].get("youtube_max_tt_s")}')
     check("порты по умолчанию 10808/10820",
           cfg2["client"]["socks_port"] == 10808 and cfg2["client"]["torrent_port"] == 10820)
     check("paths развёрнуты (state_dir/log_dir)", "state_dir" in cfg2["paths"] and "log_dir" in cfg2["paths"])

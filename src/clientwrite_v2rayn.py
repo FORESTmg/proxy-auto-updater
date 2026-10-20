@@ -2540,7 +2540,7 @@ def gui_reload(client: dict, timeout: int = 20) -> bool:
 
 def activate(client: dict, servers: list, active_id: str, cfg: dict,
              active_server=None, update_stats: bool = True, existing: list = None,
-             restart_client: bool = True) -> dict:
+             restart_client: bool = True, force_pool: bool = False) -> dict:
     """Полный цикл активации с бэкапами и откатом.
 
     Сначала пишет [AUTO]-группу, затем активирует active_id.

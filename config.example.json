@@ -48,8 +48,22 @@
     "min_pool": 60,
     "reserve_min": 30,
     "speed_rounds": 1,
-    "gate_urls": [],
-    "reserve_verify": 20
+    "gate_urls": [
+      "https://www.youtube.com/generate_204"
+    ],
+    "gate_max_s": 2.5,
+    "youtube_max_tt_s": 2.5,
+    "reserve_verify": 20,
+    "tls_urls": [
+      "https://www.youtube.com/generate_204",
+      "https://www.gstatic.com/generate_204",
+      "https://ru.wikipedia.org/",
+      "https://i.ytimg.com/generate_204",
+      "https://example.com/"
+    ],
+    "tls_max_s": 2.5,
+    "tls_min_ok": 3,
+    "hard_stall_s": 5
   },
   "sources": {
     "search_queries": [
@@ -151,7 +165,22 @@
     "ru_direct": false,
     "pool_freeze_s": 10800,
     "min_speed_kbps": 200,
-    "youtube_check_every_s": 300
+    "youtube_check_every_s": 300,
+    "balancer_probe_url": "https://www.youtube.com/generate_204",
+    "balancer_strategy": "leastLoad",
+    "balancer_max_rtt_ms": 1500,
+    "balancer_expected": 2,
+    "balancer_burst_timeout_s": 3,
+    "balancer_burst_interval_s": 2,
+    "balancer_burst_sampling": 2,
+    "post_validate": true,
+    "post_validate_rounds": 2,
+    "burst_probe_every_s": 30,
+    "burst_probe_n": 12,
+    "burst_probe_timeout_s": 6,
+    "burst_stall_s": 5,
+    "ban_bad_minutes": 30,
+    "post_validate_delay_s": 3
   },
   "diversity": {
     "per_subnet_cap": 1,

@@ -202,6 +202,7 @@ def run_watch(cfg: dict, stop_event=None, full_cycle=None, once: bool = False,
     pool_every_ticks = max(3, int(float(wc.get("pool_refresh_s", 600)) / max(1.0, interval)))
     yt_every_ticks = max(3, int(float(wc.get("youtube_check_every_s", 300)) / max(1, int(interval))))
     strict_every_ticks = max(3, int(float(wc.get("strict_check_every_s", 300)) / max(1.0, interval)))
+    burst_every_ticks = max(1, int(float(wc.get("burst_probe_every_s", 60)) / max(1.0, interval)))
     yt_fails = 0
     port = int(client.get("socks_port", 10808))
 
@@ -333,6 +334,19 @@ def run_watch(cfg: dict, stop_event=None, full_cycle=None, once: bool = False,
                     CW.ensure_balancer(client, cfg, n=bal_n)
                 except Exception as e:
                     lg.error(f"Watch: обновление пула: {e}")
+            # ПАРАЛЛЕЛЬНАЯ ПРОБА (раз в 1-2 мин): браузер открывает десятки
+            # соединений сразу, одиночный probe этого не видит. Пачка 000/rc=35
+            # -> немедленный переотбор узлов и пересборка пула (окно < 10 с).
+            if burst_every_ticks and ticks and ticks % burst_every_ticks == 0:
+                try:
+                    r_burst = CW.burst_guard(client, cfg, n=bal_n)
+                    if r_burst.startswith("rebuild_"):
+                        lg.warn(f"Watch: параллельная проба — {r_burst}")
+                    elif r_burst == "burst_unattributed":
+                        lg.warn("Watch: параллельная проба — виновник не в пуле "
+                                "(пауза включена, пул не трогаю)")
+                except Exception as e:
+                    lg.error(f"Watch: параллельная проба: {e}")
             if yt_every_ticks and ticks % yt_every_ticks == 0:
                 try:
                     ycode, ytt = CW.youtube_probe(port, timeout=12)

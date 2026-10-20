@@ -158,7 +158,8 @@ def _proc_exists(exe_path: str) -> bool:
 
 
 # ══════════════════════════════════════════ полный цикл ═══
-def run_cycle(cfg: dict, dry: bool = False, force_discovery: bool = False) -> int:
+def run_cycle(cfg: dict, dry: bool = False, force_discovery: bool = False,
+              pool_force: bool = False) -> int:
     lg = log.get_logger()
     import parser as P
     import sources as SRC
@@ -381,7 +382,7 @@ def run_cycle(cfg: dict, dry: bool = False, force_discovery: bool = False) -> in
         lg.info("[dry-run] Будет записано [AUTO]-серверов: %d, активный: %s"
                 % (len(auto_servers), active_id))
         return 0
-    if not need_write:
+    if not need_write and not pool_force:
         lg.info("Изменений нет — запись и перезапуск не требуются")
         return 0
 
@@ -396,7 +397,8 @@ def run_cycle(cfg: dict, dry: bool = False, force_discovery: bool = False) -> in
     lg.info("Пишу стор и активирую (режим балансировщика)...")
     active_server = next((s for s in ranked if eff(s) == active_id), ranked[0])
     res = CW.activate(client, auto_servers, active_id, cfg,
-                      active_server=active_server, update_stats=True)
+                      active_server=active_server, update_stats=True,
+                      force_pool=pool_force)
     if res["ok"]:
         lg.info(f"Активация завершена: {res['msg']} (rtt={res.get('rtt')} мс)")
         st.data["last_active"] = active_id
@@ -484,6 +486,17 @@ def _reserve_with_speed_check(reserve: list, cfg: dict, core: str, lg) -> list:
         cand = NF.pick_diverse(reserve, max(try_n, max_srv), cap=cap)
         lg.warn(f"Резерв: проверяю скорость у {len(cand)} узлов...")
         good = XT.verify_speed(cand, cfg, core)
+        if good:
+            # YouTube-гейт: узел может везти трафик (RTT+скорость в норме), но
+            # рвать TLS к youtube.com — именно так «глушители» попадали в пул
+            # через резервный путь, и leastPing потом выбирал их (YouTube: 000
+            # за ~40 мс при живой связи). Пустой результат — берём как есть.
+            yt = XT.youtube_filter(good, cfg, core)
+            if yt:
+                good = yt
+            else:
+                lg.warn("Резерв: YouTube не открывается ни через один узел — "
+                        "оставляю по скорости (YouTube будет нестабилен)")
         out = good[:max_srv] if good else reserve[:max_srv]
         if not good:
             lg.warn("Резерв: скорость не подтвердилась — беру по RTT (крайний случай)")
@@ -585,14 +598,19 @@ def _update_loop(cfg: dict, stop: threading.Event):
             lg.warn(f"supervisor: проверка state/refresh.flag: {e}")
         if triggered:
             lg.info("supervisor: запрос из трея «обновить серверы сейчас» — "
-                    "запускаю полный цикл обновления")
+                    "запускаю ПОЛНЫЙ цикл обновления (списки + применение пула)")
         if triggered or time.time() >= next_due:
             # Тот же штатный путь, что и плановый цикл: run_cycle под общим
             # lock-ом (не чаще одного цикла одновременно), без окон консоли.
+            # Запрос пользователя = настоящий полный цикл: тянем источники
+            # (force_discovery) и применяем свежий пул сразу (pool_force) — иначе
+            # кнопка «Обновить серверы сейчас» на деле ничего не меняла
+            # («БЫСТРЫЙ цикл» + замороженный пул).
             try:
                 if acquire_lock("cycle", stale_s=3 * 3600, cfg=cfg):
                     try:
-                        run_cycle(cfg, dry=False)
+                        run_cycle(cfg, dry=False, force_discovery=bool(triggered),
+                                  pool_force=bool(triggered))
                     finally:
                         release_lock(cfg)
                 else:

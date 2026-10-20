@@ -332,6 +332,12 @@ DEMO_FOOT_WAIT = "наблюдение включено"       # футер до
 LAST_PROC_FILE = "ui_last_proc.json"
 CARD_SHOT_REQ = "card_shot.json"             # запрос снимка карточки (проверки)
 CARD_SHOT_DONE = "card_shot_result.json"
+# ОДНО ДЕЙСТВИЕ = ОДНА КАРТОЧКА. Серия карточек в коротком окне (обрыв,
+# переключение, ответ команды) склеивается в ОДНУ: вторую и последующие не
+# выкатываем. Иначе одно нажатие «Обновить серверы сейчас» давало очередь
+# карточек (ok->error->busy->ok->off) — пользователь видел «пять уведомлений».
+# Демо-серия (флаг --show-all) гейт проходит явно, чтобы её можно было показать.
+CARD_COALESCE_MS = 2500.0
 # Дополнительные кадры движения на удержании: полоса времени «дожимает» уже
 # заполненную полосу бегущей искрой, чтобы движение было видно ВСЁ время показа.
 BAR_SHEEN_MS = 1100.0
@@ -1686,6 +1692,12 @@ class Ui(QtCore.QObject):
         self.acting = False
         self.toast = None
         self.first = True
+        # ОДНО ДЕЙСТВИЕ = ОДНА КАРТОЧКА: отметка времени последней показанной
+        # карточки и признак явного демо-показа (--show-all), который гейт
+        # склейки не проходит.
+        self._last_card_ts = 0.0
+        self._demo = False
+        self._cmd_shown_ts = 0.0
         self.last_stats = {}
         self.toast_finished = True
         self.stats = {}
@@ -1902,6 +1914,9 @@ class Ui(QtCore.QObject):
         меняет состояние).
         """
         n = SI.notif(proc)
+        # Карточка процесса — ГЛАВНАЯ для действия: помечаем её время, чтобы
+        # следом не выехала вторая (ответ команды / событие) в том же окне.
+        self._last_card_ts = time.time()
         try:
             remember_proc(self.cfg, proc)      # «последнее известное состояние»
         except Exception:
@@ -2090,6 +2105,27 @@ class Ui(QtCore.QObject):
         self.toast_finished = True
         self.toast = None
 
+    def _card_gate(self, why: str) -> bool:
+        """True — карточку показывать НЕ надо: в коротком окне уже была карточка.
+
+        ОДНО ДЕЙСТВИЕ = ОДНА КАРТОЧКА: серию (обрыв/переключение/ответ команды)
+        склеиваем в одну. Явный демо-показ (--show-all) гейт проходит.
+        """
+        if getattr(self, "_demo", False) or getattr(self, "quiet", False):
+            return False
+        now = time.time()
+        if (now - float(getattr(self, "_last_card_ts", 0.0) or 0.0)) * 1000.0 \
+                < CARD_COALESCE_MS:
+            try:
+                log.get_logger().info(
+                    f"forest-ui: карточка «{why}» не показана — в окне "
+                    f"{CARD_COALESCE_MS:.0f} мс уже была карточка (склейка)")
+            except Exception:
+                pass
+            return True
+        self._last_card_ts = now
+        return False
+
     def _on_transition(self, prev: str, cur: str) -> None:
         """Уведомляет о ЗНАЧИМЫХ переходах (обрыв, восстановление, ручное выкл).
 
@@ -2132,6 +2168,8 @@ class Ui(QtCore.QObject):
                 return
         except Exception:
             pass
+        if self._card_gate(f"событие {ev}"):
+            return
         self.acting = True
         try:
             self.show_toast(cur, tr(f"notify.{ev}.title"), tr(f"notify.{ev}.body"))
@@ -2189,7 +2227,12 @@ class Ui(QtCore.QObject):
         r = UC.read_result(self.cfg)
         if r and not self.acting and not self.quiet:
             try:
-                if (time.time() - float(r.get("ts", 0))) < 6.0:
+                rts = float(r.get("ts", 0) or 0)
+                # Один и тот же ответ команды показываем ОДИН раз (иначе
+                # повторные тики < 6 с выкатывали карточку снова).
+                if (time.time() - rts) < 6.0 and rts != getattr(self, "_cmd_shown_ts", 0.0) \
+                        and not self._card_gate("ответ команды"):
+                    self._cmd_shown_ts = rts
                     self.acting = True
                     self.show_toast("ok" if r.get("ok") else "error",
                                     tr("ui.cmd_done" if r.get("ok")
@@ -4357,6 +4400,21 @@ def selftest(cfg: dict) -> int:
     except Exception:
         pass
     QtWidgets.QApplication.processEvents()
+    # ОДНО ДЕЙСТВИЕ = ОДНА КАРТОЧКА: гейт склейки серии карточек
+    ui2 = Ui(cfg, quiet=True)
+    ui2.quiet = False            # проверяем именно гейт склейки (quiet его обходит)
+    ui2._last_card_ts = time.time()
+    chk("склейка: карточки в коротком окне подавляются (одно действие -> одна)",
+        ui2._card_gate("вторая") is True and ui2._card_gate("третья") is True)
+    ui2._last_card_ts = time.time() - (CARD_COALESCE_MS / 1000.0) - 0.1
+    chk("склейка: по истечении окна карточка показывается снова",
+        ui2._card_gate("позже") is False)
+    ui2._demo = True
+    ui2._last_card_ts = time.time()
+    chk("явный демо-режим (--show-all) гейт склейки не проходит",
+        ui2._card_gate("демо") is False)
+    chk("есть явный демо-флаг --show-all и функция показа серии",
+        callable(globals().get("show_all_demo")))
     # пустые данные не печатают нулей ни в карточке, ни в status_info
     chk("нет замера -> нет числа: final_texts(0) без «0.00 с»",
         "0.00" not in final_texts(0)[0] and "0.00" not in final_texts(0)[1],
@@ -4656,6 +4714,53 @@ def notification_service_available() -> bool:
         return False
 
 
+def show_all_demo(cfg: dict) -> int:
+    """ЯВНЫЙ ДЕМО-РЕЖИМ (--show-all): показать ВСЮ серию состояний карточки.
+
+    Это единственное место, где карточки идут серией. В обычной работе одно
+    реальное действие даёт РОВНО ОДНУ карточку (склейка в Ui._card_gate).
+    """
+    import notify as N5
+    try:
+        N5.configure(cfg)
+    except Exception:
+        pass
+    try:
+        import i18n as I
+        tt = (lambda k, **kw: I.t(k, **kw))
+    except Exception:
+        tt = None
+    st = read_raw_state(cfg)
+    tip = SI.tip(cfg, st, limit=0)
+    def T(k, d):
+        try:
+            return tt(k) if tt else d
+        except Exception:
+            return d
+    seq = [
+        ("ok", T("notify.restored.title", "Связь восстановлена"),
+         "Демо: состояние «связь восстановлена»"),
+        ("error", T("notify.lost.title", "Связь пропала"),
+         "Демо: состояние «связь пропала»"),
+        ("busy", SI.TITLE_SWITCH, "Демо: состояние «переключение сервера»"),
+        ("ok", tip, "Демо: рабочее состояние (подсказка значка)"),
+        ("off", T("notify.off.title", "Прокси выключен вручную"),
+         "Демо: состояние «прокси выключен вручную»"),
+    ]
+    for kind, title, body in seq:
+        try:
+            N5.notify(kind, title, body, force=True,
+                      duration_ms=N5.settings(cfg).get("duration_ms", 4000))
+        except Exception as e:
+            _say(f"show-all: {kind} ({title}): {e}")
+    try:
+        N5.wait_idle(90.0)
+    except Exception:
+        pass
+    _say(f"show-all: показано карточек: {len(seq)}")
+    return 0
+
+
 def main(argv=None) -> int:
     SD.safe_stdio()
     # КРЮЧОК ПРОВЕРКИ: искусственное исключение внутри main — им проверяют, что
@@ -4709,6 +4814,11 @@ def main(argv=None) -> int:
         ui.tray.hide()
         app.quit()
         return 0
+    if "--show-all" in argv:
+        # ЯВНЫЙ ДЕМО-РЕЖИМ: единственное место, где карточки идут серией
+        # (ok -> error -> busy -> ok -> off). В обычной работе — одна карточка
+        # на действие.
+        return show_all_demo(cfg)
     if "--show" in argv:
         i = argv.index("--show")
         # ОДНА карточка: даже служебный показ идёт полным составом макета —

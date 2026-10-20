@@ -24,8 +24,8 @@
 
 Версия приложения объявлена в **двух** местах, и они обязаны совпадать:
 `packaging\version_info.txt` (ресурсы exe — `filevers`/`prodvers` = `1, 3, 0, 0`,
-`FileVersion` = `1.3.0.0`, `ProductVersion` = `1.3.0`) и
-`packaging-linux\lib\common.sh` (`VERSION="1.3.0"` — имя и версия Linux-пакетов).
+`FileVersion` = `1.3.1.0`, `ProductVersion` = `1.3.1`) и
+`packaging-linux\lib\common.sh` (`VERSION="1.3.1"` — имя и версия Linux-пакетов).
 В коде `src\*.py` константы версии нет — править её там не нужно.
 Версия ядра Xray (`core_version.txt`) к версии программы отношения не имеет.
 Расхождение этих двух файлов уже приводило к тому, что сборки помечались и 1.3.0, и 1.3.1;
@@ -38,9 +38,9 @@
 
 1. В `packaging\version_info.txt` поставить нужные значения:
    - `filevers=(1, 3, 0, 0)` и `prodvers=(1, 3, 0, 0)`;
-   - `FileVersion` = `1.3.0.0`, `ProductVersion` = `1.3.0`.
+   - `FileVersion` = `1.3.1.0`, `ProductVersion` = `1.3.1`.
 2. В `packaging-linux\lib\common.sh` — та же версия в `VERSION` (по умолчанию).
-3. В `CHANGELOG.md` должна быть секция релиза `## [1.3.0] — 2026-10-18`
+3. В `CHANGELOG.md` должна быть секция релиза `## [1.3.1] — 2026-10-18`
    (формат Keep a Changelog).
 4. Проверить, что в `packaging\core_version.txt` стоит актуальный релиз ядра
    (`v26.3.27`) и он совпадает с `packaging\core.lock.json` (`release`).
@@ -214,7 +214,7 @@ GitHub Release**, не коммитить в git.
 ```
 git add -A
 git status --short
-git commit -m "Release 1.3.0"
+git commit -m "Release 1.3.1"
 ```
 
 В коммите не должно быть `config.json`, `state/`, `logs/`, `*.pid`, готовых
@@ -236,13 +236,13 @@ gh api repos/FORESTmg/proxy-auto-updater --jq '{description,private,visibility,d
 
 ---
 
-## 6. Создать тег `v1.3.0`
+## 6. Создать тег `v1.3.1`
 
 Аннотированный тег, имя совпадает с версией:
 
 ```
-git tag -a v1.3.0 -m "FOREST's Proxy Auto-updater 1.3.0"
-git push proxy v1.3.0
+git tag -a v1.3.1 -m "FOREST's Proxy Auto-updater 1.3.1"
+git push proxy v1.3.1
 ```
 
 Проверить:
@@ -262,9 +262,9 @@ git log --oneline -1
 Arch `.pkg.tar.zst`, `.tar.gz`, `AppImage`.
 
 ```
-gh release create v1.3.0 --repo FORESTmg/proxy-auto-updater ^
-   --title "v1.3.0 — ..." ^
-   --notes-file "C:/Users/<user>/.../rel130/RELEASE-NOTES-1.3.0.md" ^
+gh release create v1.3.1 --repo FORESTmg/proxy-auto-updater ^
+   --title "v1.3.1 — ..." ^
+   --notes-file "C:/Users/<user>/.../rel130/RELEASE-NOTES-1.3.1.md" ^
    "C:/Users/<user>/.../rel130/*"
 ```
 
@@ -273,7 +273,7 @@ gh release create v1.3.0 --repo FORESTmg/proxy-auto-updater ^
 Правила:
 
 - прикладывать **собранные файлы**, а не временные артефакты сборки;
-- имя тега и версия в заголовке должны совпадать (`v1.3.0` / `1.3.0`);
+- имя тега и версия в заголовке должны совпадать (`v1.3.1` / `1.3.1`);
 - каждый SHA-256 — от **того самого** приложенного файла; после публикации
   сверить список ассетов через API (имена и размеры), а не только вывод команды;
 - артефакты в git не добавляются — они живут только в релизе.

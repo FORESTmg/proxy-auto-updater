@@ -4,6 +4,81 @@ All notable changes to **FOREST's Proxy Auto-updater** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] — 2026-10-21
+
+### Fixed
+
+- **YouTube refused to load while "the connection was fine".** The gate that
+  accepted a node was a single `curl` to one domain and the balancer probe was
+  `gstatic`, which a node that tears down TLS to YouTube passes happily. Nodes
+  were therefore admitted, `leastPing` picked them, and YouTube answered `000`
+  in ~40 ms. A node is now verified by a **real handshake to several different
+  domains** (`test.tls_urls`: youtube, gstatic, wikipedia, ytimg, example.com;
+  `tls_min_ok` = 3 of 5, `tls_max_s` = 2.5 s) and the verdict separates the
+  **reason** — `reset` / `unreachable` / `mitm` / `few` (hard reject) versus
+  `slow` (a pool-relative question, not an absolute one). The balancer probe is
+  YouTube (`watch.balancer_probe_url`), and the reserve path runs the same
+  YouTube gate, so a "mute" node cannot slip into the pool through the reserve.
+- **The pool shrank on every re-selection (10 → 5 → 3 → 2).** A slow handshake
+  was judged against a fixed 2.5 s threshold, so nodes at 2.8–3.1 s were dropped
+  one round after another. A slow node is now compared with the **median of the
+  pool** (`tls_slow_factor` 1.8, `tls_slow_margin_s` 1.0) and only clear
+  outliers are dropped; `tls_hard_s` 10 s stays an absolute reject. In addition
+  `watch.pool_floor` keeps the composition from dropping below the floor.
+- **The single probe could not see a burst.** A browser opens dozens of
+  connections at once; one probe sees none of that, so a bad node stayed in the
+  pool until the user noticed. There is now a **parallel probe** (`burst_probe_n`
+  = 12 requests every `burst_probe_every_s` = 30 s, plus 16 requests × 2 rounds
+  right after the pool is applied), **attribution** of the failures to specific
+  nodes, and a **ban** for the culprits (`ban_bad_minutes` = 30).
+- **~90 re-selections per hour with no real fault.** A `github.com` request that
+  takes 5–15 s is a property of the site/route, not of the node, but it used to
+  trigger a re-selection; and when attribution found no culprit in the pool the
+  cycle simply repeated 30–40 s later. `github.com` is now a **slow URL**
+  (`burst_slow_urls`, stall 15 s) that never starts a re-selection, an
+  unattributed burst **backs off** 5/10/20/30 min (`burst_backoff_s`), and a
+  re-selection is not started for 120 s after a pool rebuild
+  (`burst_cooldown_after_rebuild_s`). Measured over an hour of live traffic:
+  **0 re-selections, 0 pool rebuilds, 0 core restarts** (was ~90).
+- **`tests`/state files and probe output were read with the machine's default
+  encoding.** Every state, config and probe read/write that this release touches
+  specifies **UTF-8** explicitly, so the Cyrillic status is not mangled by the
+  code page of the host.
+- **A burst guard that cannot act is now visible.** `burst_guard`,
+  `attribute_bad_nodes`, `ban_bad_nodes` and `cycle_running` are exported by both
+  the Windows and the POSIX back end and are pinned by `--selftest` (the POSIX
+  side used to lack them entirely, so the Linux build silently had no parallel
+  probe).
+
+### Changed
+
+- **One action = one notification card.** A single "refresh now" click produced
+  a queue of cards (ok → error → busy → ok → off) because each stage of the
+  action raised its own notification. Cards are now **coalesced in a 2.5 s
+  window** (`CARD_COALESCE_MS`), the process card marks its own time so the
+  command-reply card cannot follow it, and the same command reply is shown once
+  (previously every tick under 6 s re-showed it). The full series is still
+  available through the explicit **`--show-all`** demo mode; the selftest pins
+  both behaviours.
+- **"Обновить серверы сейчас" really is a full cycle.** The tray command used to
+  run the quick path with a frozen pool, so the button changed nothing visible.
+  It now runs with `force_discovery` (fresh lists) **and** `pool_force` (the new
+  pool is applied even when the composition looks unchanged), the same way as
+  the scheduled cycle.
+- **Balancer: `leastLoad` + `burstObservatory`** (2 s timeout, 15 s interval,
+  sample 2) instead of `leastPing`, so a stalling or dead node leaves the
+  rotation within seconds. `watch.balancer_strategy` switches back to
+  `leastPing` without a rebuild.
+
+### Verified
+
+- Live connection on the released build: **7 of 7 sites** reachable with **0
+  failures in 840 requests**, YouTube **3/3**, and `204` through the local HTTP
+  proxy, the SOCKS proxy and the LAN address.
+- One hour of the same traffic: **0 re-selections, 0 pool rebuilds, 0 core
+  restarts**; `github.com` no longer causes a single trigger; the pool stays
+  stable.
+
 ## [1.3.0] — 2026-10-18
 
 ### Added

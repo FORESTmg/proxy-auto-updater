@@ -76,6 +76,11 @@ from clientwrite import (          # noqa: F401  (явные имена — дл
     start_core, stop_client, stop_core, update_hotcache, wait_and_probe,
     write_active_id, write_auto_group, write_balancer_config, write_bin_config,
     write_core_config, youtube_probe,
+    # новые переносимые функции (пост-валидация пула, мгновенный переотбор,
+    # мульти-доменный TLS-гейт) — те же реализации, что в Windows-бэкенде:
+    # они не содержат Windows-специфики (curl + TestInstance из xraytest).
+    parallel_probe, post_validate_pool, attribute_bad_nodes, ban_bad_nodes,
+    burst_guard, burst_trigger, cycle_running,
 )
 
 IS_LINUX = os.name != "nt"

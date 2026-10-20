@@ -242,6 +242,180 @@ def _curl_probe(port: int, url: str, timeout: int) -> tuple:
         return 0, 999.0
 
 
+# ── мульти-доменный TLS-гейт ─────────────────────────────────────────────
+# Отказы на живом пуле приходили пачками и валили ОДНОВРЕМЕННО разные домены
+# (gstatic, wikipedia, ytimg) с подписью `curl rc=35 schannel: failed to
+# receive handshake` за 40-60 мс. Это не проблема одного домена, а узел,
+# который вообще не проходит TLS-рукопожатие (или рвёт его на части хостов).
+# Поэтому узел проверяется РЕАЛЬНЫМ рукопожатием к нескольким разным доменам:
+# мало получить ответ от youtube/gstatic — нужен TLS к разным точкам.
+TLS_URLS: list = []
+TLS_MAX_S = 3.0        # порог ответа одного рукопожатия (с)
+TLS_MIN_OK = 2         # сколько доменов из списка обязаны ответить
+
+
+def tls_measure(port: int, urls: list = None, timeout: float = None) -> list:
+    """Сырые результаты рукопожатий через узел на ``port``: список строк.
+
+    Каждая строка: ``{host, code, tt, ssl, rc, err}``. Отдельная функция нужна,
+    чтобы вызывающий мог СРАВНИТЬ узлы между собой (медиана по пулу), а не
+    браковать каждый по абсолютному порогу: медленный узел — не обязательно
+    плохой, если весь пул сейчас медленный на этом домене.
+    """
+    urls = list(urls if urls is not None else TLS_URLS)
+    if not urls:
+        return []
+    tmo = float(timeout if timeout is not None else (TLS_MAX_S + 1.0))
+    rows = []
+    for u in urls:
+        host = u.split("/")[2] if "//" in u else u
+        cmd = ["curl", "-s", "-S", "-o", os.devnull,
+               "-w", "%{http_code}|%{time_total}|%{ssl_verify_result}",
+               "--max-time", f"{tmo:.1f}", "-x", f"socks5h://127.0.0.1:{port}", u]
+        code, tt, sslv, rc, err = 0, 999.0, 1, 0, ""
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=tmo + 4,
+                               creationflags=_no_window())
+            rc = r.returncode
+            out = r.stdout.decode("utf-8", "replace").strip().split("|")
+            code = int(out[0]) if out and out[0].isdigit() else 0
+            tt = float(out[1]) if len(out) > 1 else 999.0
+            sslv = int(float(out[2])) if len(out) > 2 and out[2] else 1
+            err = r.stderr.decode("utf-8", "replace").strip()[:120]
+        except Exception as e:
+            rc, err = -1, f"{e}"[:120]
+        rows.append({"host": host, "url": u, "code": code, "tt": tt,
+                     "ssl": sslv, "rc": rc, "err": err})
+    return rows
+
+
+def tls_evaluate(rows: list, max_s: float = None, min_ok: int = None,
+                 hard_s: float = None) -> dict:
+    """Оценка узла по результатам :func:`tls_measure`.
+
+    Возвращает ``{ok, kind, why, good, total, worst_s, slow_s, slow_host}``.
+    ``kind`` строго разделяет ПРИЧИНУ:
+
+    * ``reset`` / ``unreachable`` / ``mitm`` — ЖЁСТКИЙ брак (узел рвёт или не
+      устанавливает TLS): в пул нельзя, лечится только исключением узла;
+    * ``few`` — мало успешных рукопожатий (тоже жёсткий, но не «сброс»);
+    * ``slow`` — рукопожатия состоялись, но медленнее порога ``max_s``. Это НЕ
+      доказательство плохого узла: при общем замедлении линии медленными будут
+      все. Решение (медиана по пулу) принимает вызывающий;
+    * ``ok`` — всё в пороге.
+    """
+    lim = float(max_s if max_s is not None else TLS_MAX_S)
+    need = max(1, int(min_ok if min_ok is not None else TLS_MIN_OK))
+    hard = float(hard_s if hard_s is not None else max(lim * 3.0, 10.0))
+    good, worst = 0, 0.0
+    slow_s, slow_host = 0.0, ""
+    for r in rows:
+        code, tt, sslv, rc = r.get("code", 0), float(r.get("tt", 999.0)), \
+            int(r.get("ssl", 1)), int(r.get("rc", 0))
+        host = r.get("host", "?")
+        if code != 0 and sslv == 0:
+            if tt <= lim:
+                good += 1
+                worst = max(worst, tt)
+            elif tt <= hard:
+                if tt > slow_s:
+                    slow_s, slow_host = tt, host
+            else:
+                # Совсем невероятное время рукопожатия — это уже не «медленно».
+                return {"ok": False, "kind": "slow", "why": f"tls_slow_{tt:.1f}s_{host}",
+                        "good": good, "total": len(rows), "worst_s": round(max(worst, tt), 2),
+                        "slow_s": round(tt, 2), "slow_host": host}
+            continue
+        # Мгновенный сброс рукопожатия (rc=35 / пустой ответ < 200 мс) —
+        # узел-«глушитель»: в пул его нельзя ни при каких условиях.
+        if rc == 35 or (code == 0 and tt < 0.2):
+            return {"ok": False, "kind": "reset", "why": f"tls_reset_{host}",
+                    "good": good, "total": len(rows), "worst_s": round(worst, 2),
+                    "slow_s": round(slow_s, 2), "slow_host": slow_host}
+        if code == 0:
+            return {"ok": False, "kind": "unreachable", "why": f"tls_unreachable_{host}",
+                    "good": good, "total": len(rows), "worst_s": round(worst, 2),
+                    "slow_s": round(slow_s, 2), "slow_host": slow_host}
+        if sslv != 0:
+            return {"ok": False, "kind": "mitm", "why": f"tls_mitm_{host}",
+                    "good": good, "total": len(rows), "worst_s": round(worst, 2),
+                    "slow_s": round(slow_s, 2), "slow_host": slow_host}
+    if slow_s:
+        return {"ok": False, "kind": "slow",
+                "why": f"tls_slow_{slow_s:.1f}s_{slow_host}", "good": good,
+                "total": len(rows), "worst_s": round(max(worst, slow_s), 2),
+                "slow_s": round(slow_s, 2), "slow_host": slow_host}
+    if good < need:
+        return {"ok": False, "kind": "few", "why": f"tls_only_{good}of{len(rows)}",
+                "good": good, "total": len(rows), "worst_s": round(worst, 2),
+                "slow_s": 0.0, "slow_host": ""}
+    return {"ok": True, "kind": "ok", "why": "", "good": good,
+            "total": len(rows), "worst_s": round(worst, 2), "slow_s": 0.0,
+            "slow_host": ""}
+
+
+def tls_gate(port: int, urls: list = None, timeout: float = None,
+             max_s: float = None, min_ok: int = None) -> tuple:
+    """Реальные TLS-рукопожатия к РАЗНЫМ доменам через узел на ``port``.
+
+    Возвращает ``(ok, why, good, total)``. Рукопожатие считается состоявшимся,
+    если пришёл любой HTTP-код (включая 403/404 — это уже ответ по TLS),
+    ``ssl_verify_result == 0`` и ответ уложился в порог. Код 000/rc=35 —
+    мгновенный сброс рукопожатия: узел бракуется сразу, без добора минимума.
+    """
+    urls = list(urls if urls is not None else TLS_URLS)
+    if not urls:
+        return True, "", 0, 0
+    ev = tls_evaluate(tls_measure(port, urls=urls, timeout=timeout),
+                      max_s=max_s, min_ok=min_ok)
+    return ev["ok"], ev["why"], ev["good"], ev["total"]
+
+
+def tls_store_path(cfg: dict) -> str:
+    return os.path.join(cfg["paths"]["state_dir"], "tls_ok.json")
+
+
+_TLS_LOCK = None
+
+
+def _tls_lock():
+    global _TLS_LOCK
+    if _TLS_LOCK is None:
+        _TLS_LOCK = threading.Lock()
+    return _TLS_LOCK
+
+
+def tls_record(cfg: dict, s, ok: bool, why: str = "") -> None:
+    """Запомнить результат TLS-гейта узла (для отбора в пул без перепроверки)."""
+    if not cfg or not getattr(s, "address", ""):
+        return
+    try:
+        with _tls_lock():          # запись идёт из параллельных потоков отбора
+            p = tls_store_path(cfg)
+            data = {}
+            try:
+                with open(p, encoding="utf-8") as f:
+                    data = json.load(f) or {}
+                if not isinstance(data, dict):
+                    data = {}
+            except Exception:
+                data = {}
+            data[f"{s.address}:{s.port}"] = {"ts": time.time(), "ok": bool(ok),
+                                            "why": (why or "")[:60]}
+            now = time.time()
+            data = {k: v for k, v in data.items()
+                    if isinstance(v, dict) and now - float(v.get("ts", 0) or 0) < 86400}
+            if len(data) > 900:
+                data = dict(sorted(data.items(),
+                                   key=lambda kv: -float(kv[1].get("ts", 0) or 0))[:900])
+            tmp = f"{p}.tmp.{os.getpid()}.{threading.get_ident()}"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(tmp, p)
+    except Exception as e:
+        log.get_logger().warn(f"tls_record: {e}")
+
+
 def _tcp_probe(s, timeout: float = 1.2) -> bool:
     """Быстрая проверка доступности host:port (DNS+connect). Без прокси."""
     try:
@@ -322,7 +496,8 @@ def test_rtt(pool: PortPool, core: str, s, timeout: int = 8, repeats: int = 1) -
 
 
 def test_speed(pool: PortPool, core: str, s, timeout: int = 10,
-               bytes_n: int = 5242880, url: str = None, rounds: int = 2) -> None:
+               bytes_n: int = 5242880, url: str = None, rounds: int = 2,
+               cfg: dict = None) -> None:
     if not s.ok:
         return
     port = pool.acquire()
@@ -340,17 +515,37 @@ def test_speed(pool: PortPool, core: str, s, timeout: int = 10,
         # 403 на конкретных доменах (типично для российских выходов).
         for gate in list(GATE_URLS):
             gcode = 0
+            gtt = 0.0
             for _try in range(2):
                 try:
-                    gcode, _gt = _curl_probe(port, gate, 12)
+                    gcode, gtt = _curl_probe(port, gate, 12)
                 except Exception:
-                    gcode = 0
+                    gcode, gtt = 0, 0.0
                 if gcode != 0:
                     break
             if gcode in (0, 403):
                 s.ok = False
                 s.fail_reason = "gate_403" if gcode == 403 else "gate_unreachable"
                 return
+            # Медленный, но формально успешный ответ = ДЕГРАДАЦИЯ: браузер на
+            # такой ноде висит («сервер недоступен»), пока соединение не отвалится.
+            if GATE_MAX_S > 0 and gtt > GATE_MAX_S:
+                s.ok = False
+                s.fail_reason = f"gate_slow_{gtt:.1f}s"
+                return
+        # МУЛЬТИ-ДОМЕННЫЙ TLS-ГЕЙТ: узел обязан пройти рукопожатие к нескольким
+        # разным доменам. Гейт по одному домену ловил только его; на живом пуле
+        # всплеск валил gstatic+wikipedia+ytimg одновременно.
+        if TLS_URLS:
+            tok, twhy, tgood, ttotal = tls_gate(port)
+            if cfg is not None:
+                tls_record(cfg, s, tok, twhy)
+            if not tok:
+                s.ok = False
+                s.fail_reason = twhy or "tls_gate"
+                return
+            s.tls_ok = True
+            s.tls_domains = tgood
         if url is None:
             url = SPEED_URL.format(bytes=bytes_n)
         speeds = []
@@ -387,6 +582,12 @@ LAST_RTT_OK = []   # все серверы, прошедшие RTT в после
 
 # Домены-«гейты»: заполняется из test.gate_urls. Пустой список = гейт выключен.
 GATE_URLS: list = []
+# Порог ОТВЕТА гейта (с): узел может отвечать «когда-нибудь», но 5-12 с на пробу
+# = деградация (браузер на такой ноде показывает «сервер недоступен», пока
+# соединение висит). Медленный ответ гейта бракует узел так же, как 000/403.
+GATE_MAX_S = 2.5
+# Порог ответа YouTube в финальной проверке (с): медленная нода — не рабочая.
+YOUTUBE_MAX_TT = 2.5
 
 
 def cleanup_test_kernels():
@@ -445,12 +646,32 @@ def cleanup_test_kernels():
 
 def run_tests(servers: list, cfg: dict, core: str) -> list:
     """Фаза 1: RTT на всех. Фаза 2: скорость на топ-RTT. Возвращает здоровых."""
-    global GATE_URLS
+    global GATE_URLS, GATE_MAX_S, YOUTUBE_MAX_TT, TLS_URLS, TLS_MAX_S, TLS_MIN_OK
     lg = log.get_logger()
     try:
         GATE_URLS = list((cfg.get("test", {}) or {}).get("gate_urls", []) or [])
+        try:
+            TLS_URLS = list((cfg.get("test", {}) or {}).get("tls_urls", []) or [])
+            TLS_MAX_S = float((cfg.get("test", {}) or {}).get("tls_max_s", 3.0) or 3.0)
+            TLS_MIN_OK = int((cfg.get("test", {}) or {}).get("tls_min_ok", 2) or 2)
+        except Exception:
+            TLS_URLS, TLS_MAX_S, TLS_MIN_OK = [], 3.0, 2
+        if TLS_URLS:
+            lg.info(f"TLS-гейт: {len(TLS_URLS)} домен(ов), порог {TLS_MAX_S:.1f} с, "
+                    f"минимум {TLS_MIN_OK} рукопожатий")
+        try:
+            GATE_MAX_S = float((cfg.get("test", {}) or {}).get(
+                "gate_max_s", GATE_MAX_S) or 0)
+        except Exception:
+            GATE_MAX_S = 2.5
+        try:
+            YOUTUBE_MAX_TT = float((cfg.get("test", {}) or {}).get(
+                "youtube_max_tt_s", YOUTUBE_MAX_TT) or 0)
+        except Exception:
+            YOUTUBE_MAX_TT = 2.5
         if GATE_URLS:
-            lg.info(f"Гейт включён: {len(GATE_URLS)} домен(ов)")
+            lg.info(f"Гейт включён: {len(GATE_URLS)} домен(ов), порог ответа "
+                    f"{GATE_MAX_S:.1f} с; YouTube-порог {YOUTUBE_MAX_TT:.1f} с")
     except Exception:
         GATE_URLS = []
     try:
@@ -519,7 +740,7 @@ def run_tests(servers: list, cfg: dict, core: str) -> list:
         for s in top:
             ex.submit(test_speed, pool, core, s, spd_to,
                       int(cfg["test"].get("speed_bytes", 5242880)), spd_url,
-                      int(cfg["test"].get("speed_rounds", 2)))
+                      int(cfg["test"].get("speed_rounds", 2)), cfg)
     _wrong = [s for s in top if not s.ok]
     _slow = [s for s in top if s.ok and s.speed_kbps < min_spd]
     _rs = Counter(s.fail_reason for s in _wrong)
@@ -563,7 +784,7 @@ def verify_speed(servers: list, cfg: dict, core: str) -> list:
     spd_url = cfg.get("test", {}).get("speed_url") or SPEED_URL.format(bytes=bytes_n)
     with cf.ThreadPoolExecutor(max_workers=workers) as ex:
         for s in servers:
-            ex.submit(test_speed, pool, core, s, spd_to, bytes_n, spd_url, rounds)
+            ex.submit(test_speed, pool, core, s, spd_to, bytes_n, spd_url, rounds, cfg)
     good = [s for s in servers if s.ok and s.speed_kbps >= min_spd]
     lg.info(f"Проверка скорости резерва: {len(good)} из {len(servers)} прошли порог {min_spd:.0f} КБ/с")
     return good
@@ -589,12 +810,38 @@ def test_youtube(pool: PortPool, core: str, s, timeout: int = 10) -> None:
             s.youtube_ok = False
             return
         code, tt = _curl_probe(port, "https://www.youtube.com", timeout)
-        s.youtube_ok = code in (200, 301, 302)
+        # Формально код 200, но ответ за 5-9 с = деградация: видео/страница не
+        # откроются, браузер покажет «сервер недоступен». Такую ноду не берём.
+        s.youtube_ok = code in (200, 301, 302) and \
+            (YOUTUBE_MAX_TT <= 0 or tt <= YOUTUBE_MAX_TT)
         s.youtube_tt = tt
     finally:
         if inst:
             inst.stop()
         pool.release(port)
+
+
+def youtube_filter(servers: list, cfg: dict, core: str) -> list:
+    """Оставляет только серверы, через которые ОТКРЫВАЕТСЯ YouTube.
+
+    Нужно резервному пути: узлы, прошедшие RTT и скорость, но рвущие TLS к
+    youtube.com (типично российские выходы — google/gstatic отдают 204, а
+    YouTube мгновенно сбрасывается), в пул попадать не должны, иначе leastPing
+    выберет их и YouTube откажет. Резерв без этой проверки был ОСНОВНОЙ дорогой
+    «глушителей» в пул.
+    """
+    lg = log.get_logger()
+    if not servers:
+        return servers
+    workers = int(cfg.get("test", {}).get("workers", 8))
+    pool = PortPool(int(cfg["test"].get("port_start", 10810)), workers * 2 + 8)
+    with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+        for s in servers:
+            s.ok = True                 # test_youtube выходит при s.ok == False
+            ex.submit(test_youtube, pool, core, s, 10)
+    good = [s for s in servers if getattr(s, "youtube_ok", False)]
+    lg.info(f"YouTube-гейт: открывается через {len(good)}/{len(servers)} узлов")
+    return good
 
 
 def final_verify(servers: list, cfg: dict, core: str) -> list:

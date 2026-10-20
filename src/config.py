@@ -206,7 +206,30 @@ DEFAULTS = {
         "max_rtt_ms": 1500, "max_jitter_ms": 800, "top_for_speed": 60,
         "max_candidates": 400, "tcp_prefilter": True, "final_verify_top": 60,
         "min_pool": 60, "reserve_min": 30, "speed_rounds": 1,
-        "gate_urls": [], "reserve_verify": 20,
+        "gate_urls": ["https://www.youtube.com/generate_204"], "reserve_verify": 20,
+        # Медленный ответ гейта/YouTube = деградация: браузер на такой ноде
+        # висит («сервер недоступен»), пока соединение не отвалится.
+        "gate_max_s": 2.5, "youtube_max_tt_s": 2.5,
+        # МУЛЬТИ-ДОМЕННЫЙ TLS-ГЕЙТ: узел проверяется реальным рукопожатием к
+        # РАЗНЫМ доменам. Пачки отказов на живом пуле валили одновременно
+        # gstatic/wikipedia/ytimg (curl rc=35 за 45 мс), т.е. узел не проходил
+        # рукопожатие вообще, а не «не пускал один домен».
+        "tls_urls": ["https://www.youtube.com/generate_204",
+                     "https://www.gstatic.com/generate_204",
+                     "https://ru.wikipedia.org/",
+                     "https://i.ytimg.com/generate_204",
+                     "https://example.com/"],
+        "tls_max_s": 2.5, "tls_min_ok": 3,
+        # МЕДЛЕННЫЙ TLS — не приговор узлу: сравниваем с МЕДИАНОЙ по пулу и
+        # бракуем только явных лидеров отставания (worst > медиана×factor или
+        # медиана+margin). Иначе порог 2.5 с выкидывал узлы за 2.8-3.1 с, и пул
+        # съёживался 10 → 5 → 3 → 2 при каждом переотборе.
+        "tls_slow_factor": 1.8, "tls_slow_margin_s": 1.0,
+        # Жёсткий потолок рукопожатия (с): дольше — уже не «медленно», а сломан.
+        "tls_hard_s": 10.0,
+        # Порог обрыва для зависшего узла: 20-секундные таймауты означали, что
+        # узел принимает соединение и не форвардит; такие вылетают за 5 с.
+        "hard_stall_s": 5,
     },
     "limits": {"max_servers": 100},
     "activation": {"prefer_current_if_healthy": True, "max_restart_wait_s": 40},
@@ -217,6 +240,34 @@ DEFAULTS = {
         "balancer_mode": True, "probe_retries": 2, "strict_check_every_s": 300,
         "ru_direct": False, "pool_freeze_s": 10800, "min_speed_kbps": 200,
         "youtube_check_every_s": 300,
+        # Зонд ЗДОРОВЬЯ узлов для балансировщика (observatory/leastPing). Не
+        # gstatic: он не видит узлы, рвущие TLS к YouTube, — leastPing выбирал
+        # их, и YouTube мгновенно отказывал (000 за ~40 мс при живой связи).
+        "balancer_probe_url": "https://www.youtube.com/generate_204",
+        # Рантайм-здоровье пула (см. clientwrite.balancer_strategy/burst_observatory):
+        # leastLoad + burstObservatory с коротким таймаутом — тормозящая/мёртвая
+        # нода уходит из ротации за секунды. Откат на leastPing — сменой стратегии
+        # в конфиге, без пересборки.
+        "balancer_strategy": "leastLoad", "balancer_max_rtt_ms": 1500,
+        "balancer_expected": 2, "balancer_burst_timeout_s": 2,
+        "balancer_burst_interval_s": 2, "balancer_burst_sampling": 2,
+        # ПОСТ-ВАЛИДАЦИЯ после применения пула и ПЕРИОДИЧЕСКАЯ параллельная
+        # проба: 16 запросов × 2 раунда / 12 запросов раз в минуту. Браузер
+        # открывает десятки соединений сразу — одиночный probe пачку не видит.
+        "post_validate": True, "post_validate_rounds": 2, "post_validate_delay_s": 3,
+        "burst_probe_every_s": 30, "burst_probe_n": 12,
+        "burst_probe_timeout_s": 6, "burst_stall_s": 5,
+        # МЕДЛЕННЫЕ адреса: их ответ (даже 5-15 с) — свойство сайта/маршрута,
+        # а не признак плохого узла. Стопор на них НЕ запускает переотбор.
+        "burst_slow_urls": ["github.com"], "burst_slow_stall_s": 15,
+        # Пауза сторожа, если атрибуция не нашла виновника в пуле: 5/10/20/30 мин.
+        # Без неё переотбор повторялся каждые 30-40 с (~90 раз за сутки).
+        "burst_backoff_s": [300, 600, 1200, 1800],
+        # Не дёргать пул сразу после пересборки (пересборка = разрыв связи).
+        "burst_cooldown_after_rebuild_s": 120,
+        # Пол пула: ниже него состав не опускаем (0 = взять diversity.min_pool_after_cap).
+        "pool_floor": 0,
+        "ban_bad_minutes": 30,
     },
     "diversity": {"per_subnet_cap": 1, "min_pool_after_cap": 12, "max_cap_relax": 4},
     "blacklist": {"cloudflare_nodes": True},
