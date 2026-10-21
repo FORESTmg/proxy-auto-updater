@@ -124,7 +124,7 @@ Windows ships as **one** file (see the last sections of this release).
   direct process card are all suppressed; the manual "Проверить уведомление"
   still works; with `enabled=true` the same failure card is shown.
 - Arch package in the `archlinux` container: contents equal to the built ELFs
-  (`forest-ui` sha256 `3fd5f5cc…`, main `5a47d9fa…`), plasmoid files equal to the
+  (`forest-ui` sha256 `6f644111…`, main `5a47d9fa…`), plasmoid files equal to the
   repo sources, `pacman -U` → run → `pacman -R` leaves no traces.
 - Plasmoid: `qmllint` against the real Plasma 6 QML modules — 0 warnings;
   `qmlformat` parses the file; `kpackagetool6 --type Plasma/Applet --install`
@@ -135,8 +135,6 @@ Windows ships as **one** file (see the last sections of this release).
 - The real DBusMenu round-trip to a KDE panel and the plasmoid on a live Plasma
   session (no Plasma on the stand): right-click behaviour in the user's theme and
   the panel icon must be checked on the VM.
-- `.rpm` was not rebuilt in this pass (`rpmbuild` absent on the stand); the
-  `.deb`, Arch package and `.tar.gz` are at 1.3.2.
 
 ### Packaging (Windows): one file instead of two
 
@@ -163,21 +161,70 @@ Windows ships as **one** file (see the last sections of this release).
   with no re-copy (same mtime), `копия на месте и совпадает по SHA-256` in the
   log; deleting `forest-ui.exe` restores it on the next start. With the target
   deliberately blocked: no crash, no window, built-in icon, one log line.
-- Windows `--selftest` on the built exe (console variant): 238 checks, PASSED.
-- Size: **68 207 911 bytes (65.05 MiB)**, sha256 `06d46544…` — was 30.8 MB +
+- Final release rebuild (helper built from the current `src/forest_ui.py`):
+  `forest-ui.exe` `7848453b…` (37 731 130 B). Sandbox re-run: cold start **≈3 s**
+  with unpacking **0.20 s** and a matching SHA-256; second start **≈4 s**, copy
+  untouched (same mtime); with the target blocked — one `WARN`, built-in icon,
+  exit **0**. A `--run` leaves one helper (one PyInstaller bootloader process plus
+  its child), never a second window.
+- Windows `--selftest` on the built exe: 238 checks, PASSED. (Needs a clean
+  environment: a leftover `FOREST_TASK_NAME` in the shell makes the watchdog
+  check fail on purpose — the environment overrides the config by design.)
+- Size: **68 246 890 bytes (65.09 MiB)**, sha256 `2d14562e…` — was 30.8 MB +
   37.7 MB as two files.
 
 ### Not verified (Windows one-file packaging)
 
-- The helper embedded here is the binary built before the in-progress menu/tray
-  edits (`src/forest_ui.py` is being changed separately); the release build picks
-  up whatever `dist/forest-ui.exe` is current, so rebuilding the helper is
-  required before publishing.
 - SmartScreen/antivirus behaviour of the 65 MB one-file build (no signed binary).
 - Upgrade over a **running** two-file 1.3.1 install: the replacement is designed
   to be skipped while `forest-ui.exe` is locked (the old copy keeps running and
   the new one lands on the next start), checked only by simulating a blocked
   target, not by upgrading a live installation.
+
+### Packaging (Linux): all five formats at 1.3.2, re-verified end to end
+
+- Rebuilt in this pass from the current ELFs (`forest-proxy-updater` `5a47d9fa…`,
+  `forest-ui` `6f644111…`): **`.rpm`** (`rpmbuild` in openSUSE Tumbleweed,
+  `cadf2f33…`) and **AppImage** (`appimagetool` via
+  `--appimage-extract-and-run`, `fb1b2255…`; the self-test inside the mounted
+  image passed). The `.deb` (`388d7062…`), Arch package (`f29b4cfe…`) and
+  `.tar.gz` (`2ec6f9f7…`) were rebuilt in the same pass, after the shipped
+  `INSTALL*.md` was brought to 1.3.2, and then re-extracted to confirm their
+  payload hashes; the artifact hashes differ from the first build of this release
+  only by those doc files (the ELFs inside are the same).
+- Payload extracted from every package and compared with the build tree: `.deb`,
+  `.rpm` and Arch carry the main ELF `5a47d9fa…` and the helper `6f644111…`;
+  `.tar.gz` and AppImage carry the main ELF (the helper is attached as a separate
+  artifact in both portable formats, by design). The plasmoid is present in all
+  three system packages, in
+  `/usr/share/plasma/plasmoids/org.forest.proxyupdater/`, byte-identical to the
+  repository sources (`metadata.json` `8150000e…`, `contents/ui/main.qml`
+  `5e3ffcc9…`, `contents/code/read-state.sh` `1145afa4…`).
+- Built Linux artifacts, offscreen (`QT_QPA_PLATFORM=offscreen`):
+  `forest-proxy-updater --selftest` — **328 checks, 0 failures** (including the 89
+  POSIX ones); `forest-ui --selftest` — **158 OK / 2 known artifacts of the
+  stand**: menu width `352 px` instead of `269 px` (no Segoe UI in WSL; on a live
+  Windows the menu is 269×487 and the run was already green in 1.3.2) and the
+  "menu-failure line is in the log" check, which reads `main.log` under
+  `FOREST_ROOT` while the line lands in the state directory's log (both files
+  exist, the marker is in the log). With a shared `$HOME` the demo-card check
+  (`демо-данные: этапы…`) also failed on the "last known process" left over in
+  `ui_last_proc.json` (1 step, `1/100000`); with an isolated `HOME`/`XDG_*` it is
+  green. `packaging/check_notify_gate.py` — 9 checks PASSED;
+  `packaging/check_linux_tray.py` — 10 checks PASSED.
+- 5-format matrix, one distribution at a time, port 11808
+  (`linux/tests/wsl-matrix.sh --isolate`) on the FINAL artifacts: **66 PASS /
+  0 FAIL / 0 SKIP** — install → unit visible → service **active** → a real `204`
+  **through the package's own tunnel** → uninstall → no package, no files, no
+  units, port closed. `.deb` (Debian 13) 13/13, `204` after ~252 s · `.tar.gz`
+  (Ubuntu 26.04) 13/13, ~252 s · AppImage (Ubuntu 26.04, user install) 14/14,
+  ~249 s · `.rpm` (openSUSE Tumbleweed) 13/13, ~267 s · Arch `.pkg.tar.zst`
+  (Arch rolling) 13/13, ~258 s. The host's live proxy (10808) was not involved.
+- `INSTALL.md` / `INSTALL.ru.md` shipped inside every package now name **1.3.2**
+  in their examples (the packages were rebuilt after those two files changed; the
+  extracted copies show `1.3.1` **0** times and `1.3.2` 18 times).
+- `SHA256SUMS` (901 B, 9 entries) covers all nine assets; each artifact also has
+  its own `.sha256`.
 
 ## [1.3.1] — 2026-10-21
 
