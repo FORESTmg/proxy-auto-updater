@@ -251,6 +251,10 @@ _STRINGS = {
     "ui.cmd_failed": {"ru": "Не удалось", "en": "Failed"},
     "ui.status.absent": {"ru": "помощник интерфейса не установлен (работает встроенный значок)",
                          "en": "interface helper not installed (built-in icon is used)"},
+    "ui.status.embedded": {"ru": "помощник интерфейса встроен, ещё не распакован "
+                                "(распакуется при запуске: {path})",
+                           "en": "interface helper is embedded, not unpacked yet "
+                                 "(it is unpacked on start: {path})"},
     "ui.status.running": {"ru": "помощник интерфейса работает (pid {pid})",
                           "en": "interface helper is running (pid {pid})"},
     "ui.status.stopped": {"ru": "помощник интерфейса установлен, но не запущен",

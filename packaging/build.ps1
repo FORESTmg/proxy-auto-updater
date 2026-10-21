@@ -24,7 +24,8 @@ param(
     [switch]$Clean,     # снести .build-venv, build\, dist\ перед сборкой
     [switch]$NoVenv,    # ставить PyInstaller в системный Python, без venv
     [string]$Python = '', # явный путь к python.exe
-    [switch]$GenerateIcon # ЯВНО разрешить нарисовать app.ico (make_icon.py)
+    [switch]$GenerateIcon, # ЯВНО разрешить нарисовать app.ico (make_icon.py)
+    [string]$Helper = ''   # путь к собранному forest-ui.exe (по умолчанию dist\)
 )
 
 # ВНИМАНИЕ: именно 'Continue'. При 'Stop' любой вывод нативного процесса в stderr
@@ -46,6 +47,7 @@ $SpecPath = Join-Path $Here 'ForestProxyUpdater.spec'
 $IconPath = Join-Path $Here 'app.ico'
 $CoreExe = Join-Path $Here 'vendor\bin\xray\xray.exe'
 $ReqPath = Join-Path $Here 'requirements-build.txt'
+$HelperPath = if ($Helper) { $Helper } else { Join-Path $DistDir 'forest-ui.exe' }
 
 function Info($m) { Write-Host "[build] $m" }
 function Die($m) { Write-Host "[build] ОШИБКА: $m" -ForegroundColor Red; exit 1 }
@@ -183,6 +185,35 @@ if (-not (Test-Path -LiteralPath $IconPath)) {
     Info "  app.ico sha256=$IconHash"
 }
 
+# ────────────────────────────────────── 3б. собранный помощник ───
+# Windows-версия отдаётся пользователю ОДНИМ файлом: forest-ui.exe встраивается
+# внутрь основного .exe как данные (ui_bundle/) и распаковывается при первом
+# запуске. Значит, к моменту сборки помощник должен быть уже собран — иначе
+# получился бы .exe без значка/меню/уведомлений, то есть молчаливо урезанный.
+if (-not (Test-Path -LiteralPath $HelperPath)) {
+    Die ("нет собранного помощника интерфейса: $HelperPath`n" +
+         "        Windows-версия ставится ОДНИМ файлом — помощник встраивается внутрь.`n" +
+         "        Соберите его:  powershell -ExecutionPolicy Bypass -File packaging\build-ui.ps1`n" +
+         "        (или укажите готовый: build.ps1 -Helper D:\путь\forest-ui.exe)")
+}
+$HelperItem = Get-Item -LiteralPath $HelperPath
+$HelperHash = (Get-FileHash -LiteralPath $HelperPath -Algorithm SHA256).Hash.ToLower()
+$HelperMib = [math]::Round($HelperItem.Length / 1MB, 2)
+Info ("помощник интерфейса для встраивания: $($HelperItem.FullName)`n" +
+      "        размер $($HelperItem.Length) байт ($HelperMib МиБ), sha256=$HelperHash`n" +
+      "        собран $($HelperItem.LastWriteTime.ToString('yyyy-MM-dd HH:mm'))")
+# Честное предупреждение, а не тихая подмена: помощник мог быть собран ДО
+# правок интерфейса (меню/трей правятся отдельно).
+foreach ($s in @('forest_ui.py', 'ui_menu.py', 'ui_style.py', 'ui_cmd.py')) {
+    $srcFile = Join-Path (Join-Path (Split-Path -Parent $Here) 'src') $s
+    if ((Test-Path -LiteralPath $srcFile) -and
+        ((Get-Item -LiteralPath $srcFile).LastWriteTime -gt $HelperItem.LastWriteTime)) {
+        Info ("ВНИМАНИЕ: src\$s новее собранного помощника — в .exe попадёт " +
+              "СТАРЫЙ интерфейс. Пересоберите: build-ui.ps1")
+    }
+}
+$env:FOREST_HELPER_EXE = $HelperItem.FullName
+
 # ────────────────────────────────────── 4. сборка ───
 # Воспроизводимость процесса: PyInstaller вшивает в PE штамп времени — фиксируем
 # его, чтобы метка не «плясала» между сборками. Побитовой идентичности .exe это
@@ -222,6 +253,10 @@ $report = [ordered]@{
     core_release = $coreRelease
     console      = $false
     onefile      = $true
+    helper_path  = $HelperItem.FullName
+    helper_size_bytes = $HelperItem.Length
+    helper_sha256 = $HelperHash
+    helper_embedded = $true
 }
 $report | ConvertTo-Json -Depth 4 | Out-File -Encoding utf8 (Join-Path $DistDir 'build-report.json')
 "$hash  ForestProxyUpdater.exe" | Out-File -Encoding ascii (Join-Path $DistDir 'ForestProxyUpdater.exe.sha256')

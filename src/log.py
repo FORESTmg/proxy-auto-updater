@@ -15,6 +15,7 @@ FOREST's Proxy Auto-updater (GPL-3.0).
 """
 import os
 import sys
+import time
 import datetime
 
 
@@ -68,6 +69,15 @@ class Logger:
         candidates.append(os.path.join(tmp, "ForestProxyUpdater", "logs"))
         self.path = os.path.join(self.dir, "main.log")
         self._fh = None
+        # АНТИ-СПАМ: одинаковая строка не пишется чаще, чем раз в dedupe_s;
+        # сколько раз её подавили — дописывается к следующей такой строке.
+        # Журнал systemd читает человек, и «одна и та же тревога 90 раз за
+        # сутки» прячет настоящие события.
+        try:
+            self.dedupe_s = float(os.environ.get("FOREST_LOG_DEDUPE_S", "60") or 60)
+        except Exception:
+            self.dedupe_s = 60.0
+        self._seen = {}
         for c in candidates:
             try:
                 os.makedirs(c, exist_ok=True)
@@ -78,6 +88,21 @@ class Logger:
             break
 
     def log(self, msg: str):
+        msg = str(msg)
+        now = time.time()
+        prev = self._seen.get(msg)
+        if self.dedupe_s > 0 and prev is not None:
+            if now - prev[0] < self.dedupe_s:
+                prev[1] += 1              # подавлено, но посчитано
+                return
+            if prev[1]:
+                msg = (f"{msg}  [повторилось {prev[1]} раз(а) за "
+                       f"{int(now - prev[0])} с]")
+            prev[0], prev[1] = now, 0
+        else:
+            self._seen[msg] = [now, 0]
+        if len(self._seen) > 4000:        # страховка от роста на длинном прогоне
+            self._seen.clear()
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         line = f"[{ts}] {msg}"
         # stdout в собранном приложении — ТОЛЬКО ASCII и без исключений:

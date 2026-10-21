@@ -59,6 +59,8 @@ def main() -> int:
     check("geo_asset_dir подменён на POSIX", core.geo_asset_dir is CW._posix_geo_asset_dir)
     check("_sys_proxy_state подменён на POSIX",
           core._sys_proxy_state is CW._posix_sys_proxy_state)
+    check("_sys_proxy_supported подменён на POSIX (механизм своего стола)",
+          core._sys_proxy_supported is CW._posix_sys_proxy_supported)
     check("_mode_of подменён на POSIX (только standalone)",
           core._mode_of is CW._posix_mode_of and CW._mode_of({"mode": "v2rayn"}) == "standalone")
     check("имена с подчёркиванием доступны наружу (mirror)",
@@ -274,6 +276,166 @@ def main() -> int:
         hk.release(unlink=False)
     except Exception as e:
         check("помощник (Linux): проверки замка", False, str(e))
+
+    print()
+    print("=" * 64)
+    print("P9. Рабочий стол (KDE/GNOME), системный прокси и журнал UTF-8")
+    print("=" * 64)
+    import desktop_env as DE
+    # ── определение стола (живой дефект: KDE определялся как GNOME) ──
+    d_kde = DE.detect({"XDG_CURRENT_DESKTOP": "KDE"})
+    check("стол: XDG_CURRENT_DESKTOP=KDE -> kde", d_kde["desktop"] == "kde", d_kde)
+    d_kde2 = DE.detect({"DESKTOP_SESSION": "plasmawayland",
+                        "KDE_SESSION_VERSION": "6"})
+    check("стол: DESKTOP_SESSION=plasmawayland -> kde", d_kde2["desktop"] == "kde")
+    d_kde3 = DE.detect({"KDE_FULL_SESSION": "true"})
+    check("стол: KDE_FULL_SESSION=true -> kde", d_kde3["desktop"] == "kde")
+    d_gn = DE.detect({"XDG_CURRENT_DESKTOP": "GNOME"})
+    check("стол: XDG_CURRENT_DESKTOP=GNOME -> gnome", d_gn["desktop"] == "gnome")
+    d_gn2 = DE.detect({"XDG_CURRENT_DESKTOP": "X-Cinnamon"})
+    check("стол: X-Cinnamon -> gnome-подобный (GSettings)", d_gn2["desktop"] == "gnome")
+    d_none = DE.detect({})
+    check("стол: пустое окружение без процессов -> other (честный WARN, не GNOME)",
+          d_none["desktop"] == "other", d_none)
+    d_proc = DE.detect({}, procs=["kwin_wayland", "plasmashell"])
+    check("стол: пустое окружение + процессы kwin/plasmashell -> kde",
+          d_proc["desktop"] == "kde" and d_proc["source"] == "proc", d_proc)
+    d_mix = DE.detect({"XDG_CURRENT_DESKTOP": "KDE:GNOME"})
+    check("стол: составное KDE:GNOME -> kde (KDE проверяется первым)",
+          d_mix["desktop"] == "kde")
+    check("сессия: WAYLAND_DISPLAY -> wayland",
+          DE.session_type({"WAYLAND_DISPLAY": "wayland-0"}) == "wayland")
+    check("сессия: XDG_SESSION_TYPE=x11 -> x11",
+          DE.session_type({"XDG_SESSION_TYPE": "x11"}) == "x11")
+
+    # ── поиск графического сеанса по /proc (фальшивое дерево) ──
+    fake = os.path.join(_TMP, "fakeproc")
+    fpid = "4242"
+    os.makedirs(os.path.join(fake, fpid), exist_ok=True)
+    with open(os.path.join(fake, fpid, "comm"), "w", encoding="utf-8") as f:
+        f.write("kwin_wayland\n")
+    envs = b"USER=forest\x00WAYLAND_DISPLAY=wayland-0\x00" \
+           b"XDG_RUNTIME_DIR=/run/user/1000\x00" \
+           b"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus\x00" \
+           b"XDG_CURRENT_DESKTOP=KDE\x00"
+    with open(os.path.join(fake, fpid, "environ"), "wb") as f:
+        f.write(envs)
+    sess_found = DE.scan_sessions(proc_root=fake, skip_uid=None)
+    check("сеанс: /proc-скан находит графический сеанс (kwin_wayland + D-Bus)",
+          len(sess_found) == 1 and sess_found[0]["comm"] == "kwin_wayland",
+          f"найдено {len(sess_found)}")
+    if sess_found:
+        check("сеанс: стол из окружения процесса сеанса -> kde",
+              (sess_found[0]["env"].get("XDG_CURRENT_DESKTOP") == "KDE"))
+    nosess = DE.find_graphical_session(env={}, proc_root=os.path.join(_TMP, "noproc"),
+                                       me=0)
+    check("сеанс: root без сеанса -> ok=False и понятная причина",
+          nosess["ok"] is False and "сеанс" in nosess["reason"], nosess.get("reason"))
+
+    # ── журнал: кириллица должна доходить как UTF-8, без '?????' ──
+    import safestdio as SD
+    check("журнал: stdout на Linux принимает UTF-8 (say не портит кириллицу)",
+          SD.unicode_stdout() is True)
+    import io as _io
+    import contextlib as _ctx
+    buf = _io.StringIO()
+    with _ctx.redirect_stdout(buf):
+        SD.say("Проверка кириллицы: связь есть, узлов 10")
+    said = buf.getvalue()
+    check("say(): кириллица выходит как есть (нет литеральных '?')",
+          "Проверка кириллицы" in said and "?????" not in said, repr(said))
+    lp = os.path.join(_TMP, "logs_utf8")
+    lg_u = log.Logger(lp)
+    lg_u.info("Проверка кириллицы в журнале: WARN не было")
+    lg_u.close()
+    raw = open(os.path.join(lp, "main.log"), "rb").read()
+    txt = raw.decode("utf-8")
+    check("файл журнала: строка с кириллицей читается как UTF-8",
+          "Проверка кириллицы" in txt, txt[-120:])
+    check("файл журнала: в нём НЕТ '?????' вместо букв", b"?????" not in raw)
+    check("файл журнала: нет ни одного байта-заменителя ошибки декодирования",
+          "\ufffd" not in txt)
+
+    # анти-спам журнала: одна и та же строка не повторяется каждые 30-60 с
+    lp2 = os.path.join(_TMP, "logs_spam")
+    lg_s = log.Logger(lp2)
+    for _ in range(8):
+        lg_s.warn("Системный прокси (GNOME) установлен на 127.0.0.1:10808")
+    lg_s.close()
+    spam = open(os.path.join(lp2, "main.log"), encoding="utf-8").read()
+    n_spam = spam.count("Системный прокси (GNOME) установлен")
+    check("анти-спам журнала: 8 одинаковых строк подряд -> 1 строка",
+          n_spam == 1, f"строк {n_spam}")
+
+    # ── системный прокси: недоступный механизм -> один раз и без цикла ──
+    real_ctx = CW.desktop_context
+    real_gs = getattr(CW, "_HAS_GSETTINGS", None)
+    try:
+        CW.desktop_context = lambda refresh=False: {
+            "session": {"ok": False, "reason": "тест: нет сеанса",
+                        "prefix": [], "env": {}, "uid": None},
+            "info": {"desktop": "other", "name": "тест-стол"}, "at": time.time()}
+        CW._reset_proxy_notes()
+        CW._reset_desktop_cache()
+        lp3 = os.path.join(_TMP, "logs_proxy")
+        log.reset_logger(lp3)
+        supported, why = CW._posix_sys_proxy_supported()
+        check("прокси: без сеанса пользователя механизм недоступен (не ошибка)",
+              supported is False and "сеанс" in why, why)
+        res = [CW._posix_sys_proxy_apply("127.0.0.1:10808") for _ in range(4)]
+        check("прокси: 4 попытки при недоступном механизме -> ни одна не «успех»",
+              res == [False, False, False, False], res)
+        log.get_logger().close()
+        line_no = open(os.path.join(lp3, "main.log"), encoding="utf-8").read()
+        n_msg = line_no.count("Системный прокси: не настраиваю")
+        check("прокси: о недоступности сказано РОВНО ОДИН раз (нет спама)",
+              n_msg == 1, f"строк {n_msg}")
+
+        # ── KDE: запись kioslaverc + ПРОВЕРКА ЧТЕНИЕМ (без kwriteconfig) ──
+        home = os.path.join(_TMP, "kdehome")
+        os.makedirs(os.path.join(home, ".config"), exist_ok=True)
+        sess_kde = {"ok": True, "uid": None, "home": home, "prefix": [],
+                    "env": {"XDG_CURRENT_DESKTOP": "KDE", "HOME": home}}
+        real_kw, real_reparse = CW._kwriteconfig, CW._kde_reparse
+        CW._kwriteconfig = lambda: ""
+        CW._kde_reparse = lambda sess: None
+        CW._HAS_GSETTINGS = False        # проверяем ИМЕННО ветку kioslaverc
+        try:
+            CW.desktop_context = lambda refresh=False: {
+                "session": sess_kde,
+                "info": {"desktop": "kde", "name": "KDE Plasma"}, "at": time.time()}
+            ok_kde = CW._kde_apply(sess_kde, "127.0.0.1:10808")
+            on_k, srv_k = CW._kde_read(sess_kde)
+            check("прокси KDE: kioslaverc записан и ПРОЧИТАН обратно (ProxyType=1)",
+                  ok_kde is True and on_k is True and srv_k == "127.0.0.1:10808",
+                  f"ok={ok_kde}, on={on_k}, srv={srv_k!r}")
+            kio = open(os.path.join(home, ".config", "kioslaverc"),
+                       encoding="utf-8").read()
+            check("прокси KDE: в файле есть httpProxy и httpsProxy на наш порт",
+                  "ProxyType=1" in kio and "http://127.0.0.1:10808" in kio
+                  and "httpsProxy=http://127.0.0.1:10808" in kio, kio[:200])
+            check("прокси KDE: состояние читается как наш сервер (повтора не будет)",
+                  CW._posix_sys_proxy_state() == (True, "127.0.0.1:10808"))
+            CW._reset_proxy_notes()
+            n_before = len(open(os.path.join(lp3, "main.log"),
+                                encoding="utf-8").read())
+            CW._posix_sys_proxy_state()          # повторные вызовы состояния
+            n_after = len(open(os.path.join(lp3, "main.log"),
+                               encoding="utf-8").read())
+            check("прокси KDE: чтение состояния ничего не пишет в журнал",
+                  n_after == n_before, f"{n_before} -> {n_after} байт")
+            ok_dis = CW._kde_disable(sess_kde)
+            check("прокси KDE: disable пишет ProxyType=0 и читается как выключено",
+                  ok_dis is True and CW._kde_read(sess_kde)[0] is False)
+        finally:
+            CW._kwriteconfig, CW._kde_reparse = real_kw, real_reparse
+    finally:
+        CW.desktop_context = real_ctx
+        CW._reset_proxy_notes()
+        CW._reset_desktop_cache()
+        CW._HAS_GSETTINGS = real_gs
+        log.reset_logger(os.path.join(_TMP, "logs"))
+
 
     print()
     print("=" * 64)

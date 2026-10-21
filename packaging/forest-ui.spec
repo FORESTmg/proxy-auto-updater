@@ -35,10 +35,10 @@ for _f in (_ICON, _EXAMPLE, os.path.join(_SRC, "forest_ui.py")):
 # Наши модули подключаем явно: часть из них импортируется лениво (внутри функций)
 HIDDEN = [
     "config", "i18n", "log", "notify", "theme", "tray_icon", "tray_menu",
-    "tray_status", "ui_cmd", "ui_helper", "ui_menu", "ui_style",
+    "tray_status", "ui_cmd", "ui_helper", "ui_bundle", "ui_menu", "ui_style",
     "clientwrite", "clientwrite_posix",
     "clientwrite_v2rayn", "instancelock", "watchdog", "parser", "netfilters",
-    "safestdio",
+    "desktop_env", "safestdio",
 ]
 
 DATAS = [(_ICON, "."), (_EXAMPLE, ".")]

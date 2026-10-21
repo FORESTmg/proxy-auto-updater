@@ -1,0 +1,23 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "X-Plasma-API-Minimum-Version": "6.0",
+    "X-Plasma-MainScript": "ui/main.qml",
+    "KPlugin": {
+        "Id": "org.forest.proxyupdater",
+        "Name": "FOREST Proxy Updater",
+        "Name[ru]": "FOREST — обновление прокси",
+        "Description": "Tray icon with the FOREST proxy state; right-click opens the updater's own menu",
+        "Description[ru]": "Значок состояния прокси FOREST; по правой кнопке открывается НАШЕ меню программы",
+        "Icon": "forest-proxy-updater",
+        "Category": "System Information",
+        "License": "GPL-3.0-only",
+        "Version": "1.3.2",
+        "Website": "https://github.com/FORESTmg/proxy-auto-updater",
+        "Authors": [
+            {
+                "Name": "FOREST",
+                "Email": "forest@example.invalid"
+            }
+        ]
+    }
+}

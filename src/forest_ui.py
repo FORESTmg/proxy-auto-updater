@@ -27,6 +27,7 @@ License ... may be used under the terms of the GNU GPL»).
 Запуск
 ------
     forest-ui                      # жить в трее (запускается один раз, при входе)
+    forest-ui --menu-popup [x y]   # показать НАШЕ меню в точке (плазмоид KDE)
     forest-ui --show ok "Заголовок" "Текст"   # показать одно уведомление и выйти
     forest-ui --menu-dump          # напечатать дерево меню (для проверок)
     forest-ui --selftest           # самопроверка: значки, темы, FPS, фокус
@@ -79,6 +80,13 @@ if not QT_OK:
 
 import safestdio as SD
 
+# ui_style — ЧИСТЫЙ stdlib (никакого Qt): константы вида карточки и меню нужны
+# на уровне модуля (блок NT_* ниже). Импорт ОБЯЗАН быть вне `if QT_OK:`: иначе
+# без Qt (нет libglvnd/libEGL — они лишь в optdepends пакета) блок NT_* падал
+# `NameError: name 'US' is not defined` ещё на импорте, и вместо понятного
+# «Qt недоступен» с кодом 3 пользователь видел трассировку PyInstaller.
+import ui_style as US
+
 if QT_OK:
     import config as CFG
     import i18n as I
@@ -89,7 +97,6 @@ if QT_OK:
     import tray_status as TS
     import ui_cmd as UC
     import ui_menu as UMN
-    import ui_style as US
 
 # Состояния значка: четыре основные + состояния ЭТАЛОНА (switch — переключение
 # сервера, noanswer — «сторож молчит», restoring — восстановление связи).
@@ -1680,13 +1687,32 @@ def enum_int(value, default: int = -1) -> int:
         return default
 
 
+class _NoTray:
+    """Заглушка значка: режим ``--menu-popup`` показывает ТОЛЬКО меню.
+
+    Плазмоид KDE (``plasma/plasmoid``) запускает ``forest-ui --menu-popup``;
+    второй значок в трее там не нужен и вреден (два значка на одну программу).
+    Все вызовы ``Ui`` к трею (``setIcon``, ``setToolTip``, ``show``, ``hide``)
+    здесь безвредны, ``geometry()`` пустой — якорь меню берётся по курсору.
+    """
+
+    def __getattr__(self, _name):
+        return lambda *a, **k: None
+
+    def geometry(self):
+        return None
+
+
 class Ui(QtCore.QObject):
-    def __init__(self, cfg: dict, quiet: bool = False):
+    def __init__(self, cfg: dict, quiet: bool = False, tray: bool = True):
         super().__init__()
         self.cfg = cfg
         # quiet=True — «не показывать карточку»: нужно проверкам (замер кадров
         # меню на живом экране не должен вытаскивать уведомления на экран)
         self.quiet = bool(quiet)
+        # tray=False — БЕЗ значка в трее: режим ``--menu-popup`` (плазмоид KDE
+        # показывает НАШЕ меню отдельным процессом, второго значка быть не должно)
+        self.has_tray = bool(tray)
         self.kind = "off"
         self.tip = ""
         self.acting = False
@@ -1701,7 +1727,6 @@ class Ui(QtCore.QObject):
         self.last_stats = {}
         self.toast_finished = True
         self.stats = {}
-        self.tray = QtWidgets.QSystemTrayIcon(self)
         # СВОЁ всплывающее меню вместо QMenu: QMenu не умеет ни анимации, ни
         # стиля карточки. Модель меню (пункты/галочки/подменю) собирается из тех
         # же QAction, что и раньше, поэтому состав и поведение НЕ меняются.
@@ -1710,19 +1735,28 @@ class Ui(QtCore.QObject):
         self._menu_panel = None
         self._menu_theme = None
         self._build_menu()
+        # QMenu трею НЕ отдаём НИКОГДА (см. _on_tray_activated): в XEmbed-панелях
+        # (XFCE, MATE, Cinnamon, LXQt) setContextMenu приводил к тому, что правый
+        # клик рисовал штатный QMenu панели вместо НАШЕГО окна.
+        self.tray = (QtWidgets.QSystemTrayIcon(self) if self.has_tray
+                     else _NoTray())
         self.refresh()
-        # меню рисуем САМИ по правому клику: своё меню у трея не ставим, иначе
-        # Qt показал бы системный QMenu поверх нашего окна
-        try:
-            self.tray.activated.connect(self._on_tray_activated)
-        except Exception:
-            pass
-        self.tray.show()
-        self.timer = QtCore.QTimer(self)
-        self.timer.setInterval(1000)
-        self.timer.timeout.connect(self.refresh)
-        self.timer.start()
-        QtCore.QTimer.singleShot(0, self._ping)
+        if self.has_tray:
+            try:
+                self.tray.activated.connect(self._on_tray_activated)
+            except Exception:
+                pass
+            self.tray.show()
+            self.timer = QtCore.QTimer(self)
+            self.timer.setInterval(1000)
+            self.timer.timeout.connect(self.refresh)
+            self.timer.start()
+        else:
+            self.timer = None
+        if self.has_tray:
+            # Пульс «помощник жив» пишет ТОЛЬКО процесс со значком: процесс
+            # --menu-popup живёт секунды, и его пульс врал бы в --status.
+            QtCore.QTimer.singleShot(0, self._ping)
 
     # ── меню ──
     def _build_menu(self) -> None:
@@ -1739,7 +1773,59 @@ class Ui(QtCore.QObject):
         """Текстовый дамп меню — доказательство структуры для проверок."""
         return UMN.dump_rows((self.menu_model or UMN.MenuGroup()).rows)
 
-    # ── показ нашего меню и переходы состояний ──
+    # ── меню по правому клику: НАШЕ окно, а не QMenu ──
+    def _icon_anchor(self):
+        """Точка, у которой стоит значок: геометрия трея, иначе курсор.
+
+        В XEmbed-панелях Qt отдаёт прямоугольник значка (``tray.geometry()``),
+        и меню встаёт ровно у него — даже если панель далеко от курсора. Если
+        геометрии нет (SNI/панель не сообщает), берём позицию курсора: правый
+        клик всегда приходит с курсором НА значке.
+        """
+        try:
+            g = self.tray.geometry()
+            if g is not None and g.width() > 0 and g.height() > 0:
+                return g.center()
+        except Exception:
+            pass
+        return QtGui.QCursor.pos()
+
+    def _on_tray_activated(self, reason) -> None:
+        """Клик по значку: меню открывает ТОЛЬКО правая кнопка — как в Windows.
+
+        * **Windows** — правый клик приходит программе (``Context``), рисуем
+          наше окно (:class:`ui_menu.PopupMenu`) у значка;
+        * **Linux, XEmbed** (XFCE, MATE, Cinnamon, LXQt — панель без
+          StatusNotifier) — правый клик ТОЖЕ приходит программе как ``Context``,
+          и мы показываем ТО ЖЕ наше окно. Именно для этого убран
+          ``QSystemTrayIcon.setContextMenu()``: пока меню было отдано трею, Qt
+          сам открывал штатный QMenu, и наш обработчик не вызывался;
+        * **Linux, SNI** (KDE Plasma, GNOME с AppIndicator) — правый клик по
+          протоколу обрабатывает ПАНЕЛЬ и в программу ``Context`` не приходит;
+          ничего не меняется (левый клик молчит, значка с меню нет). Для этих
+          панелей есть наш плазмоид (``plasma/plasmoid``), который показывает
+          это же меню через ``forest-ui --menu-popup``.
+
+        Левый клик (``Trigger``) и двойной не открывают НИЧЕГО на всех
+        платформах.
+
+        Две защиты, каждая из которых обязательна:
+        * причина клика сравнивается БЕЗ ``int()`` по члену перечисления
+          (:func:`enum_int`) — именно ``int(ActivationReason.Context)`` роняло
+          помощник на PySide6 6.9;
+        * показ меню обёрнут в ``try/except`` — ошибка меню (нет экрана,
+          несовместимость с ``Qt.Popup``, исключение в отрисовке) остаётся
+          ошибкой меню и НЕ убивает помощник.
+        """
+        try:
+            ctx = enum_int(QtWidgets.QSystemTrayIcon.ActivationReason.Context)
+            if enum_int(reason) != ctx:
+                return                    # левый клик/двойной — меню не открываем
+        except Exception:
+            self._tray_error("разбор причины клика")
+            return
+        self._show_menu_guarded(self._icon_anchor())
+
     def _tray_error(self, what: str) -> None:
         """Ошибка в пути меню трея: пишем в журнал и ЖИВЁМ дальше.
 
@@ -1759,29 +1845,10 @@ class Ui(QtCore.QObject):
         except Exception:
             pass
 
-    def _on_tray_activated(self, reason) -> None:
-        """Правый клик по значку трея — наше меню (координаты берём по курсору).
-
-        Как и прежде (системное меню у ``QSystemTrayIcon``), меню открывается
-        ТОЛЬКО по правому клику: левый клик, как и раньше, ничего не открывает.
-
-        Две защиты, каждая из которых обязательна:
-        * причина клика сравнивается БЕЗ ``int()`` по члену перечисления
-          (:func:`enum_int`) — именно ``int(ActivationReason.Context)`` роняло
-          помощник на PySide6 6.9;
-        * показ меню обёрнут в ``try/except`` — ошибка меню (нет экрана,
-          несовместимость с ``Qt.Popup``, исключение в отрисовке) остаётся
-          ошибкой меню и НЕ убивает помощник.
-        """
+    def _show_menu_guarded(self, pos=None) -> None:
+        """Показ нашего окна меню с защитой: сбой меню не убивает помощник."""
         try:
-            ctx = enum_int(QtWidgets.QSystemTrayIcon.ActivationReason.Context)
-            if enum_int(reason) != ctx:
-                return                    # левый клик/двойной — меню не открываем
-        except Exception:
-            self._tray_error("разбор причины клика")
-            return
-        try:
-            self.show_menu()
+            self.show_menu(pos)
         except Exception:
             self._tray_error("показ меню по правому клику")
 
@@ -3746,19 +3813,54 @@ def selftest(cfg: dict) -> int:
         f"Context={enum_int(ARC.Context)}, Trigger={enum_int(ARC.Trigger)}, "
         f"числом={enum_int(getattr(ARC.Context, 'value', None))}")
     # Что слот делает с причиной: правим показ меню на счётчик и смотрим вызовы.
+    # Windows И Linux/XEmbed: меню — по правому клику (Context) в НАШЕ окно,
+    # левый и двойной молчат. (В SNI-окружениях Context в программу не приходит —
+    # там меню показывает наш плазмоид KDE, см. --menu-popup.)
     shows = []
     real_show = ui.show_menu
+
+    def _count_show(pos=None):
+        shows.append(pos)
+        return {}
+
     try:
-        ui.show_menu = lambda pos=None: (shows.append(pos), {})[1]
-        ui._on_tray_activated(ARC.Context)                     # как приходит из Qt
-        ui._on_tray_activated(enum_int(ARC.Context))           # числом (старый Qt)
+        ui.show_menu = _count_show
+        ui._on_tray_activated(ARC.Context)                     # правый клик
+        n_ctx = len(shows)
+        ui._on_tray_activated(enum_int(ARC.Context))           # правый числом
+        n_ctx_int = len(shows)
         ui._on_tray_activated(ARC.Trigger)                     # левый клик
+        n_trig = len(shows)
+        ui._on_tray_activated(enum_int(ARC.Trigger))           # левый числом
+        n_trig_int = len(shows)
         ui._on_tray_activated(ARC.DoubleClick)                 # двойной
+        n_dbl = len(shows)
     finally:
         ui.show_menu = real_show
-    chk("слот трея открывает меню по ПРАВОМУ клику (член enum и число), "
-        "и НЕ открывает по левому/двойному",
-        len(shows) == 2, f"показов меню {len(shows)} (ожидалось 2)")
+    if os.name == "nt":
+        chk("Windows: правый клик открывает наше меню (член enum и число), "
+            "левый и двойной — НЕ открывают",
+            (n_ctx, n_ctx_int, n_trig, n_trig_int, n_dbl) == (1, 2, 2, 2, 2),
+            f"показов: Context={n_ctx}, int(Context)={n_ctx_int}, "
+            f"Trigger={n_trig}, int(Trigger)={n_trig_int}, DoubleClick={n_dbl}")
+    else:
+        # XEmbed-панели (XFCE, MATE, Cinnamon, LXQt) доставляют правый клик
+        # программе как Context — меню обязано быть НАШИМ окном, а не QMenu.
+        chk("Linux/XEmbed: ПРАВЫЙ клик открывает НАШЕ меню (член enum и число)",
+            n_ctx == 1 and n_ctx_int == 2,
+            f"показов: Context={n_ctx}, int(Context)={n_ctx_int}")
+        chk("Linux/XEmbed: ЛЕВЫЙ и двойной клик меню НЕ открывают",
+            n_trig == n_ctx_int and n_trig_int == n_ctx_int and n_dbl == n_ctx_int,
+            f"показов: Trigger={n_trig}, int(Trigger)={n_trig_int}, "
+            f"DoubleClick={n_dbl} (после правых {n_ctx_int})")
+    # QMenu трею НЕ отдаём НИ НА ОДНОЙ платформе: пока он был отдан, XEmbed-панели
+    # открывали штатное меню Qt вместо нашего окна (это и был дефект 1.3.2).
+    try:
+        pm = ui.tray.contextMenu()
+    except Exception:
+        pm = None
+    chk("QMenu трею не отдан (setContextMenu убран) — правый клик рисуем сами",
+        pm is None, f"contextMenu={pm!r}")
     # БЕЗОПАСНОСТЬ: исключение внутри показа меню не вылетает наружу
     log_path = os.path.join(SD.log_dir(), "main.log")
 
@@ -3777,6 +3879,7 @@ def selftest(cfg: dict) -> int:
     escaped = ""
     try:
         ui.show_menu = _boom_menu
+        # Проверяем именно СЛОТ трея на обеих платформах: правый клик — один путь.
         ui._on_tray_activated(ARC.Context)
     except BaseException as _e:                      # noqa: BLE001 — ловим ВСЁ
         escaped = repr(_e)
@@ -3807,6 +3910,57 @@ def selftest(cfg: dict) -> int:
         ui._close_menu(instant=True)
     except Exception:                              # noqa: BLE001
         pass
+
+    # ── РЕЖИМ ПЛАЗМОИДА: меню в заданной точке, БЕЗ второго значка ──
+    _say()
+    _say("=" * 64)
+    _say("2г. --menu-popup (плазмоид KDE): наше меню без значка в трее")
+    _say("=" * 64)
+    ui2 = None
+    try:
+        ui2 = Ui(cfg, quiet=True, tray=False)
+        chk("--menu-popup не создаёт значок в трее (второго значка нет)",
+            ui2.has_tray is False and not isinstance(ui2.tray,
+                                                     QtWidgets.QSystemTrayIcon)
+            and ui2.timer is None,
+            f"has_tray={ui2.has_tray}, tray={type(ui2.tray).__name__}, "
+            f"таймер={ui2.timer!r}")
+        p = QtCore.QPoint(420, 300)
+        st = ui2.show_menu(p)
+        pnl = ui2._menu_panel
+        # Правило места: правый край у точки, ЛИБО прижато к краю экрана —
+        # проверяем обе части (на стенде 800x600 меню шире половины экрана).
+        scr = pnl.screen_for(p) if pnl is not None else None
+        area = scr.availableGeometry() if scr else QtCore.QRect(0, 0, 1920, 1080)
+        ideal = p.x() + 4 - (pnl.panel_w if pnl else 0)
+        exp_px = max(area.left() + 6, min(ideal, area.right() - (pnl.panel_w if pnl else 0) - 6))
+        # По вертикали правило меню: выше курсора, а если не поместилось — ниже
+        # (на стенде 800x800 панель 487 px выше курсора не влезает).
+        ph = pnl.panel_h if pnl else 0
+        up = p.y() - 6 - ph
+        if up < area.top() + 6:
+            up = min(p.y() + 6, area.bottom() - ph - 6)
+        exp_py = max(area.top() + 6, min(up, area.bottom() - ph - 6))
+        chk("--menu-popup показывает НАШЕ окно меню в заданной точке",
+            pnl is not None and isinstance(st, dict) and pnl.isVisible()
+            and abs(pnl._px - exp_px) <= 1 and abs(pnl._py - exp_py) <= 1,
+            f"панель {type(pnl).__name__ if pnl else 'None'}, "
+            f"поставлено {getattr(pnl, '_px', '?')},{getattr(pnl, '_py', '?')} "
+            f"(ожидалось {exp_px},{exp_py}) при точке {p.x()},{p.y()}, "
+            f"экран {area.width()}x{area.height()}, ширина панели "
+            f"{getattr(pnl, 'panel_w', '?')}")
+        chk("--menu-popup: якорь без геометрии трея берётся по курсору",
+            ui2._icon_anchor() == QtGui.QCursor.pos(),
+            f"якорь {ui2._icon_anchor()}, курсор {QtGui.QCursor.pos()}")
+    except Exception as _e:                        # noqa: BLE001
+        chk("--menu-popup: режим плазмоида работает без значка",
+            False, repr(_e))
+    finally:
+        if ui2 is not None:
+            try:
+                ui2._close_menu(instant=True)
+            except Exception:                      # noqa: BLE001
+                pass
 
     _say()
     _say("=" * 64)
@@ -4761,6 +4915,51 @@ def show_all_demo(cfg: dict) -> int:
     return 0
 
 
+def menu_popup_mode(cfg: dict, at=None) -> int:
+    """РЕЖИМ ПЛАЗМОИДА: показать НАШЕ меню в заданной точке и выйти.
+
+    Отдельный процесс БЕЗ значка в трее (``Ui(tray=False)``): в KDE иконку в
+    панели рисует наш плазмоид (``plasma/plasmoid/org.forest.proxyupdater``), а
+    меню обязано быть нашим — с анимацией, стилем и подменю. Поэтому плазмоид
+    по клику запускает ``forest-ui --menu-popup``, а тот показывает РОВНО ТО ЖЕ
+    окно (:class:`ui_menu.PopupMenu`), что открывает правый клик по значку, и
+    завершается, когда меню закрыто.
+
+    Точка: ``--menu-popup <x> <y>``. Без координат — позиция курсора: плазмоид
+    зовёт без них, потому что в момент клика курсор стоит НА иконке, а глобальные
+    координаты панели из QML известны не всегда.
+
+    Киоск процесса: ``Qt.Popup`` сам закрывается по клику вне меню; после
+    анимации закрытия (260 мс) окно скрывается, и опрос завершает приложение.
+    Страховка — минута: зависшее окно не оставляет процесс навсегда.
+    """
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    app.setQuitOnLastWindowClosed(False)
+    ui = Ui(cfg, quiet=True, tray=False)
+    pos = QtCore.QPoint(int(at[0]), int(at[1])) if at else QtGui.QCursor.pos()
+    state = {"closed": False}
+
+    def _poll() -> None:
+        pnl = ui._menu_panel
+        if pnl is None:
+            return
+        if pnl._phase == "done" or not pnl.isVisible():
+            t.stop()
+            state["closed"] = True
+            app.quit()
+
+    stats = ui.show_menu(pos)
+    t = QtCore.QTimer()
+    t.setInterval(120)
+    t.timeout.connect(_poll)
+    t.start()
+    QtCore.QTimer.singleShot(60000, app.quit)     # страховка от зависшего окна
+    rc = app.exec()
+    _say(f"menu-popup: меню показано в {pos.x()},{pos.y()} "
+         f"(кадров {stats.get('frames', 0)}, закрыто={state['closed']})")
+    return int(rc or 0)
+
+
 def main(argv=None) -> int:
     SD.safe_stdio()
     # КРЮЧОК ПРОВЕРКИ: искусственное исключение внутри main — им проверяют, что
@@ -4814,6 +5013,18 @@ def main(argv=None) -> int:
         ui.tray.hide()
         app.quit()
         return 0
+    if "--menu-popup" in argv:
+        # МЕНЮ ДЛЯ ПЛАЗМОИДА: показать наше окно в заданной точке и выйти.
+        # Отдельный процесс без значка в трее — иконку в панели рисует плазмоид.
+        i = argv.index("--menu-popup")
+        at = None
+        rest = [a for a in argv[i + 1:i + 3]]
+        if len(rest) >= 2:
+            try:
+                at = (float(rest[0]), float(rest[1]))
+            except Exception:
+                at = None
+        return menu_popup_mode(cfg, at)
     if "--show-all" in argv:
         # ЯВНЫЙ ДЕМО-РЕЖИМ: единственное место, где карточки идут серией
         # (ok -> error -> busy -> ok -> off). В обычной работе — одна карточка

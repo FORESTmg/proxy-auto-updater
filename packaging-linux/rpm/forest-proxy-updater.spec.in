@@ -88,6 +88,8 @@ cp -a %{_sourcedir}/payload/. %{buildroot}/
 /usr/share/applications/forest-proxy-updater.desktop
 /usr/share/applications/forest-proxy-updater-ui.desktop
 /usr/share/icons/hicolor/256x256/apps/forest-proxy-updater.png
+# Плазмоид KDE (значок в панели Plasma + наше меню)
+/usr/share/plasma/plasmoids/org.forest.proxyupdater
 /usr/lib/systemd/system/forest-proxy-updater.service
 /usr/lib/systemd/system/forest-proxy-updater-refresh.service
 /usr/lib/systemd/system/forest-proxy-updater.timer

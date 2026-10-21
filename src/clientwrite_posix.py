@@ -362,11 +362,51 @@ def _posix_geo_asset_dir(core: str = None, cfg: dict = None) -> str:
 
 
 # ══════════════════════════════════════════ системный прокси (POSIX) ═══
-# На Linux системный прокси — это настройка рабочего стола (GNOME/GSettings)
-# либо переменные окружения. Окон/диалогов нет: при отсутствии gsettings
-# вызовы становятся безвредными no-op, чтобы программа работала и в
-# минимальной среде (сервер, WSL, контейнер) — мягкая деградация.
+# На Linux системный прокси — это настройка РАБОЧЕГО СТОЛА, и механизм у
+# каждого стола свой: GNOME-подобные (GNOME/Unity/Cinnamon/MATE/Budgie/XFCE/
+# UKUI/DDE) читают GSettings ``org.gnome.system.proxy``, KDE Plasma — файл
+# ``kioslaverc`` (``kwriteconfig6/5``), остальные (i3, sway, openbox) общего
+# механизма не имеют вовсе. Подробности — ``desktop_env.py``.
+#
+# ТРИ ПРАВИЛА, БЕЗ КОТОРЫХ ЭТО ЛОМАЛОСЬ (найдено на живой CachyOS, пакет 1.3.1):
+#  1) стол определяется ЯВНО: раньше признаком GNOME считалось наличие
+#     ``gsettings``, а он есть и на KDE (его тянет glib2) — KDE определялся как
+#     GNOME, и программа каждый цикл ставила GNOME-прокси;
+#  2) запись ПРОВЕРЯЕТСЯ ЧТЕНИЕМ. Системная служба работает от root без
+#     сеансовой шины D-Bus: GSettings уходит в backend ``memory``, ``set``
+#     возвращает код 0 и НИЧЕГО не сохраняет, а следующий процесс читает
+#     исходное значение — «успех» без эффекта;
+#  3) сообщение пишется ОДИН РАЗ на состояние (плюс общая дедупликация в
+#     ``log.py``), а при недоступном механизме программа не пытается снова
+#     каждые 30-60 с, а перепроверяет стол/сеанс раз в 10 минут.
+#
+# Окон/диалогов нет: в минимальной среде (сервер, WSL, контейнер) вызовы
+# остаются безвредными no-op — мягкая деградация, программа работает на своём
+# порту и честно пишет в журнал одну строку.
 _HAS_GSETTINGS = None
+_DE_CACHE = None                  # {"session", "info", "at"} — кэш «стол+сеанс»
+_DE_TTL = 600.0                   # перепроверка раз в 10 минут, не каждый цикл
+_NOTES = {}                       # key -> ts: «сообщить один раз»
+
+
+def _note_once(key: str, level: str, msg: str, ttl: float = 1800.0) -> bool:
+    """Сообщение ОДИН раз (повтор — не раньше ``ttl`` секунд). -> сказали ли."""
+    now = time.time()
+    prev = _NOTES.get(key)
+    if prev is not None and now - prev < ttl:
+        return False
+    _NOTES[key] = now
+    try:
+        getattr(log.get_logger(), level if level in ("info", "warn", "error")
+                else "info")(msg)
+    except Exception:
+        pass
+    return True
+
+
+def _reset_proxy_notes() -> None:
+    """Забыть «уже сообщали» (проверки и смена состояния)."""
+    _NOTES.clear()
 
 
 def _has_gsettings() -> bool:
@@ -377,75 +417,385 @@ def _has_gsettings() -> bool:
     return bool(_HAS_GSETTINGS)
 
 
-def _gsettings_get(schema: str, key: str) -> str:
+def _kwriteconfig() -> str:
+    """Утилита записи настроек KDE: ``kwriteconfig6`` (Plasma 6), иначе 5."""
+    import shutil
+    for name in ("kwriteconfig6", "kwriteconfig5"):
+        p = shutil.which(name)
+        if p:
+            return p
+    return ""
+
+
+def desktop_context(refresh: bool = False) -> dict:
+    """Кэш «рабочий стол + графический сеанс» (перепроверка раз в 10 минут)."""
+    global _DE_CACHE
+    now = time.time()
+    if not refresh and _DE_CACHE and now - float(_DE_CACHE.get("at", 0)) < _DE_TTL:
+        return _DE_CACHE
     try:
-        r = subprocess.run(["gsettings", "get", schema, key],
-                           capture_output=True, text=True, timeout=8)
+        import desktop_env as DE
+        sess = DE.find_graphical_session()
+        info = sess.get("desktop") or DE.detect()
+        _DE_CACHE = {"session": sess, "info": info, "at": now}
+    except Exception as e:                       # модуль есть всегда, но не падаем
+        _DE_CACHE = {"session": {"ok": False, "reason": f"desktop_env: {e}",
+                                 "prefix": [], "env": {}, "uid": None},
+                     "info": {"desktop": "other", "name": "неизвестный"},
+                     "at": now}
+    return _DE_CACHE
+
+
+def _reset_desktop_cache() -> None:
+    global _DE_CACHE
+    _DE_CACHE = None
+
+
+def _home_of(sess: dict) -> str:
+    """Домашний каталог пользователя сеанса (не наш, если работаем от root)."""
+    home = (sess or {}).get("home")
+    if home:
+        return str(home)          # явно заданный каталог (проверки, песочница)
+    uid = (sess or {}).get("uid")
+    if uid is None:
+        return os.path.expanduser("~")
+    try:
+        import pwd
+        return pwd.getpwuid(int(uid)).pw_dir
+    except Exception:
+        return (sess.get("env") or {}).get("HOME") or os.path.expanduser("~")
+
+
+def _kioslaverc_path(sess: dict = None) -> str:
+    sess = sess if sess is not None else desktop_context()["session"]
+    return os.path.join(_home_of(sess), ".config", "kioslaverc")
+
+
+def _ini_read(path: str, section: str) -> dict:
+    """Мини-чтение ini (configparser меняет регистр ключей — нам это нельзя)."""
+    out, cur = {}, ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith("#") or s.startswith(";"):
+                    continue
+                if s.startswith("[") and s.endswith("]"):
+                    cur = s[1:-1].strip()
+                    continue
+                if cur == section and "=" in s:
+                    k, _, v = s.partition("=")
+                    out[k.strip()] = v.strip()
+    except Exception:
+        return {}
+    return out
+
+
+def _ini_write_keys(path: str, section: str, pairs: dict) -> bool:
+    """Записать ключи в ini БЕЗ потери остальных секций. -> получилось ли."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        lines = []
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.read().splitlines()
+            try:
+                import shutil as _sh
+                _sh.copy2(path, path + ".bak.forest")
+            except Exception:
+                pass
+        out, cur, written = [], "", False
+        for line in lines:
+            s = line.strip()
+            if s.startswith("[") and s.endswith("]"):
+                if cur == section and not written:
+                    out += [f"{k}={v}" for k, v in pairs.items()]
+                    written = True
+                cur = s[1:-1].strip()
+                out.append(line)
+                continue
+            if cur == section and "=" in s:
+                k = s.partition("=")[0].strip()
+                if k in pairs:
+                    continue                     # заменим ниже одним блоком
+            out.append(line)
+        if cur == section and not written:
+            out += [f"{k}={v}" for k, v in pairs.items()]
+            written = True
+        if not written:
+            out += ["", f"[{section}]"] + [f"{k}={v}" for k, v in pairs.items()]
+        tmp = path + ".tmp.forest"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(out) + "\n")
+        os.replace(tmp, path)
+        return True
+    except Exception as e:
+        _note_once("ini-write:" + str(path), "warn", f"kioslaverc: запись {path}: {e}")
+        return False
+
+
+def _split_proxy(value: str) -> tuple:
+    """``http://user:pass@127.0.0.1:10808/`` -> ``("127.0.0.1", "10808")``."""
+    v = str(value or "").strip()
+    if "://" in v:
+        v = v.split("://", 1)[1]
+    v = v.rstrip("/")
+    if "@" in v:
+        v = v.rsplit("@", 1)[1]
+    host, _, port = v.rpartition(":")
+    if not host:
+        return v, ""
+    return host, port
+
+
+# ── KDE Plasma: kioslaverc ──
+def _kde_apply(sess: dict, server: str) -> bool:
+    """Прописать прокси в kioslaverc (KDE Plasma) и ПРОВЕРИТЬ чтением."""
+    host, prt = _split_proxy(server)
+    if not host:
+        return False
+    url = f"http://{host}:{prt}" if prt else f"http://{host}"
+    pairs = {"ProxyType": "1", "httpProxy": url, "httpsProxy": url,
+             "ftpProxy": url,
+             "socksProxy": f"socks://{host}:{prt}" if prt else f"socks://{host}",
+             "NoProxyFor": "localhost,127.0.0.1,::1"}
+    ok = False
+    kw = _kwriteconfig()
+    if kw:
+        try:
+            import desktop_env as DE
+            good = True
+            for k, v in pairs.items():
+                r = DE.run_in_session([kw, "--file", "kioslaverc", "--group",
+                                       "Proxy Settings", "--key", k, str(v)],
+                                      sess, timeout=10)
+                good = good and getattr(r, "returncode", 1) == 0
+            ok = good
+        except Exception:
+            ok = False
+    if not ok:
+        # без kwriteconfig (или он не сработал) — прямая запись файла
+        ok = _ini_write_keys(_kioslaverc_path(sess), "Proxy Settings", pairs)
+    if ok:
+        _kde_reparse(sess)
+        on, srv = _kde_read(sess)
+        want = f"{host}:{prt}" if prt else host
+        if not (on and srv == want):
+            _note_once("kde-verify:" + want, "warn",
+                       f"kioslaverc записан, но прочитался как «{srv or '—'}» "
+                       f"вместо «{want}» — прокси KDE может не примениться")
+            return False
+    return ok
+
+
+def _kde_read(sess: dict) -> tuple:
+    """(включён, «host:port») по kioslaverc."""
+    vals = _ini_read(_kioslaverc_path(sess), "Proxy Settings")
+    if str(vals.get("ProxyType", "")).strip() != "1":
+        return False, ""
+    raw = (vals.get("httpProxy") or vals.get("httpsProxy")
+           or vals.get("socksProxy") or "")
+    host, prt = _split_proxy(raw)
+    if not host:
+        return False, ""
+    return True, (f"{host}:{prt}" if prt else host)
+
+
+def _kde_reparse(sess: dict) -> None:
+    """Заставить KIO перечитать настройки (без этого часть приложений ждёт
+    перезапуска). Сигнал есть в Plasma 5/6; ошибку игнорируем."""
+    import shutil
+    if not shutil.which("dbus-send"):
+        return
+    try:
+        import desktop_env as DE
+        DE.run_in_session(["dbus-send", "--type=signal", "/KIO/Scheduler",
+                           "org.kde.KIO.Scheduler.reparseSlaveConfiguration",
+                           "string:"], sess, timeout=6)
+    except Exception:
+        pass
+
+
+def _kde_disable(sess: dict) -> bool:
+    """Выключить прокси KDE (ProxyType=0)."""
+    kw = _kwriteconfig()
+    if kw:
+        try:
+            import desktop_env as DE
+            r = DE.run_in_session([kw, "--file", "kioslaverc", "--group",
+                                   "Proxy Settings", "--key", "ProxyType", "0"],
+                                  sess, timeout=10)
+            if getattr(r, "returncode", 1) == 0:
+                _kde_reparse(sess)
+                return True
+        except Exception:
+            pass
+    ok = _ini_write_keys(_kioslaverc_path(sess), "Proxy Settings",
+                         {"ProxyType": "0"})
+    if ok:
+        _kde_reparse(sess)
+    return ok
+
+
+# ── GNOME-подобные и всё, что читает GSettings (Chromium/Electron/GTK) ──
+def _gsettings_get(sess: dict, schema: str, key: str) -> str:
+    import desktop_env as DE
+    try:
+        r = DE.run_in_session(["gsettings", "get", schema, key], sess, timeout=8)
         return (r.stdout or "").strip().strip("'")
     except Exception:
         return ""
 
 
-def _gsettings_set(schema: str, key: str, value) -> bool:
+def _gsettings_set(sess: dict, schema: str, key: str, value) -> bool:
+    import desktop_env as DE
     try:
-        r = subprocess.run(["gsettings", "set", schema, key, str(value)],
-                           capture_output=True, timeout=8)
-        return r.returncode == 0
+        r = DE.run_in_session(["gsettings", "set", schema, key, str(value)],
+                              sess, timeout=8)
+        return getattr(r, "returncode", 1) == 0
     except Exception:
         return False
 
 
-def _posix_sys_proxy_state() -> tuple:
-    """(включён, сервер) системного прокси: GSettings, иначе переменные среды."""
-    if _has_gsettings():
-        mode = _gsettings_get("org.gnome.system.proxy", "mode")
-        host = _gsettings_get("org.gnome.system.proxy.socks", "host")
-        prt = _gsettings_get("org.gnome.system.proxy.socks", "port")
-        if mode == "manual":
-            return True, (f"{host}:{prt}" if host else "")
+def _gs_read(sess: dict) -> tuple:
+    """(включён, «host:port») по GSettings (http-прокси — то, что берёт браузер)."""
+    if not _has_gsettings():
         return False, ""
+    base = "org.gnome.system.proxy"
+    if _gsettings_get(sess, base, "mode") != "manual":
+        return False, ""
+    host = prt = ""
+    for proto in ("http", "https", "socks"):
+        host = _gsettings_get(sess, f"{base}.{proto}", "host")
+        prt = _gsettings_get(sess, f"{base}.{proto}", "port")
+        if host:
+            break
+    return (True, f"{host}:{prt}" if host else "")
+
+
+def _gs_apply(sess: dict, server: str) -> bool:
+    """Поставить прокси в GSettings и ПРОВЕРИТЬ чтением (иначе «успех» врёт)."""
+    if not _has_gsettings():
+        return False
+    host, prt = _split_proxy(server)
+    if not host:
+        return False
+    base = "org.gnome.system.proxy"
+    try:
+        for proto in ("http", "https", "ftp", "socks"):
+            _gsettings_set(sess, f"{base}.{proto}", "host", host)
+            try:
+                _gsettings_set(sess, f"{base}.{proto}", "port", int(prt or 0))
+            except Exception:
+                _gsettings_set(sess, f"{base}.{proto}", "port", prt)
+        _gsettings_set(sess, base, "ignore-hosts",
+                       "['localhost', '127.0.0.1', '::1']")
+        _gsettings_set(sess, base, "mode", "manual")
+    except Exception as e:
+        _note_once("gs-apply", "warn", f"gsettings: {e}")
+        return False
+    on, srv = _gs_read(sess)
+    want = f"{host}:{prt}" if prt else host
+    if not (on and srv == want):
+        _note_once("gs-verify:" + want, "warn",
+                   f"gsettings записан, но прочитался как «{srv or '—'}» вместо "
+                   f"«{want}» (нет сеансовой шины D-Bus? тогда GSettings уходит "
+                   f"в backend memory и НЕ сохраняется) — системный прокси GNOME "
+                   f"не применён")
+        return False
+    return True
+
+
+def _posix_sys_proxy_supported() -> tuple:
+    """(можно ли управлять прокси ОС, причина отказа). Кэш 10 минут."""
+    ctx = desktop_context()
+    sess, de = ctx["session"], (ctx["info"] or {}).get("desktop")
+    if not sess.get("ok"):
+        return False, sess.get("reason") or "нет графического сеанса"
+    if de == "kde":
+        return True, ""                       # kioslaverc умеем и без kwriteconfig
+    if de == "gnome":
+        if not _has_gsettings():
+            return False, "нет gsettings (пакет glib2 не установлен)"
+        return True, ""
+    if _has_gsettings():                      # GTK/Chromium читают GSettings
+        return True, ""
+    return False, (f"рабочий стол «{(ctx['info'] or {}).get('name')}» не имеет "
+                   f"общего механизма системного прокси")
+
+
+def _posix_sys_proxy_state() -> tuple:
+    """(включён, сервер) системного прокси — по механизму СВОЕГО стола."""
+    ctx = desktop_context()
+    sess, de = ctx["session"], (ctx["info"] or {}).get("desktop")
+    if sess.get("ok"):
+        if de == "kde":
+            on, srv = _kde_read(sess)
+            if on:
+                return True, srv
+        if _has_gsettings():
+            on, srv = _gs_read(sess)
+            if on:
+                return True, srv
     env = (os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY")
            or os.environ.get("all_proxy") or os.environ.get("ALL_PROXY") or "")
     return bool(env), env
 
 
 def _posix_sys_proxy_apply(server: str) -> bool:
-    """Поставить системный прокси (GNOME/GSettings), иначе мягкий отказ.
+    """Поставить системный прокси механизмом СВОЕГО рабочего стола.
 
-    Возврат False не является ошибкой: на сервере/WSL прокси ОС не
-    управляется, программа продолжает работать на своём порту.
+    Возврат False не является ошибкой: на сервере/WSL прокси ОС не управляется,
+    программа продолжает работать на своём порту. Каждое состояние
+    сообщается в журнал ОДИН раз (без повторов каждые 30-60 с).
     """
-    lg = log.get_logger()
-    if not _has_gsettings():
-        lg.info("Системный прокси: gsettings недоступен (нет рабочего стола GNOME) — "
-                "управление прокси ОС пропущено, трафик идёт через порт программы")
+    ok_av, why = _posix_sys_proxy_supported()
+    if not ok_av:
+        host, prt = _split_proxy(server)
+        _note_once("proxy-unavailable", "info",
+                   f"Системный прокси: не настраиваю — {why}. Задайте прокси в "
+                   f"браузере вручную: {host}:{prt or '—'} (или запустите "
+                   f"помощник внутри сеанса пользователя)")
         return False
-    try:
-        host, _, prt = str(server).rpartition(":")
-        if not host:
-            host, prt = "127.0.0.1", str(server)
-        _gsettings_set("org.gnome.system.proxy.socks", "host", host)
-        try:
-            _gsettings_set("org.gnome.system.proxy.socks", "port", int(prt))
-        except Exception:
-            _gsettings_set("org.gnome.system.proxy.socks", "port", prt)
-        ok = _gsettings_set("org.gnome.system.proxy", "mode", "manual")
-        if ok:
-            lg.warn(f"Системный прокси (GNOME) установлен на {server}")
-        return ok
-    except Exception as e:
-        lg.warn(f"системный прокси (GNOME): {e}")
-        return False
+    ctx = desktop_context()
+    sess, de = ctx["session"], (ctx["info"] or {}).get("desktop")
+    done, ok = [], False
+    if de == "kde":
+        if _kde_apply(sess, server):
+            done.append("KDE kioslaverc")
+            ok = True
+        # Chromium/Electron/GTK читают GSettings даже на KDE — ставим и его
+        if _gs_apply(sess, server):
+            done.append("gsettings для Chromium/GTK")
+            ok = True
+    else:
+        if _gs_apply(sess, server):
+            done.append("gsettings")
+            ok = True
+    if ok:
+        _note_once("proxy-on:" + str(server), "info",
+                   f"Системный прокси {server} установлен ({', '.join(done)}; "
+                   f"стол: {(ctx['info'] or {}).get('name')})")
+        return True
+    _note_once("proxy-fail:" + str(server), "warn",
+               f"Системный прокси {server} применить не удалось "
+               f"(стол: {(ctx['info'] or {}).get('name')}) — браузеру задайте "
+               f"прокси вручную")
+    return False
 
 
 def _posix_sys_proxy_disable() -> bool:
-    """Снять системный прокси (GNOME/GSettings)."""
-    if not _has_gsettings():
-        return False
-    try:
-        return _gsettings_set("org.gnome.system.proxy", "mode", "none")
-    except Exception:
-        return False
+    """Снять системный прокси механизмом своего стола."""
+    ctx = desktop_context()
+    sess, de = ctx["session"], (ctx["info"] or {}).get("desktop")
+    ok = False
+    if sess.get("ok"):
+        if de == "kde":
+            ok = _kde_disable(sess) or ok
+        if _has_gsettings():
+            ok = _gsettings_set(sess, "org.gnome.system.proxy", "mode", "none") or ok
+    _note_once("proxy-off", "info", "Системный прокси снят")
+    return ok
 
 
 # ══════════════════════════════════════════ режим и порт ═══
@@ -489,6 +839,7 @@ _PATCHES = {
     "_sys_proxy_state": _posix_sys_proxy_state,
     "_sys_proxy_apply": _posix_sys_proxy_apply,
     "_sys_proxy_disable": _posix_sys_proxy_disable,
+    "_sys_proxy_supported": _posix_sys_proxy_supported,
     "_mode_of": _posix_mode_of,
     "ensure_port_free": _posix_ensure_port_free,
 }
@@ -521,6 +872,7 @@ geo_asset_dir = _posix_geo_asset_dir
 _sys_proxy_state = _posix_sys_proxy_state
 _sys_proxy_apply = _posix_sys_proxy_apply
 _sys_proxy_disable = _posix_sys_proxy_disable
+_sys_proxy_supported = _posix_sys_proxy_supported
 _mode_of = _posix_mode_of
 ensure_port_free = _posix_ensure_port_free
 

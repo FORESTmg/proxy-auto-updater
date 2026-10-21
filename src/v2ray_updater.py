@@ -257,7 +257,12 @@ def run_cycle(cfg: dict, dry: bool = False, force_discovery: bool = False,
         room = max(0, cap - len(keep_user))
         take_prio = prio[:room]
         pool = keep_user + take_prio + other[:max(0, room - len(take_prio))]
-        lg.warn(f"Кандидатов > {cap}; взято {len(pool)}")
+        # ЭТО НЕ ПРОБЛЕМА: кандидатов больше, чем разрешено тестировать за
+        # цикл (test.max_candidates). Раньше писалось WARN «Кандидатов > 400;
+        # взято 400» — в journal это выглядело как тревога, хотя штатное
+        # ограничение нагрузки. Теперь INFO и с объяснением, что это лимит.
+        lg.info(f"Кандидатов больше лимита test.max_candidates ({cap}) — на тест "
+                f"беру {len(pool)} (лимит задаётся в config.json, не ошибка)")
     lg.info(f"Кандидатов на тест: {len(pool)}")
     try:
         _save_pool_cache(cfg, pool)
@@ -320,7 +325,10 @@ def run_cycle(cfg: dict, dry: bool = False, force_discovery: bool = False,
             ranked.append(s)
             added += 1
         if added:
-            lg.warn(f"Добавлен резерв по RTT: +{added} (итого {len(ranked)})")
+            # Тоже штатный ход: строгий отбор дал меньше reserve_min, добрали
+            # по RTT с пометкой _reserve. WARN здесь пугал без причины.
+            lg.info(f"Резерв по RTT: +{added} (итого {len(ranked)}, "
+                    f"нужно было {reserve_min}) — добор, не ошибка")
 
     # --- кап по подсетям ---
     try:
@@ -1179,12 +1187,24 @@ def install(cfg: dict) -> int:
     lg.info(f"  надзор (watchdog): {wd['action']} — {wd['detail']}")
 
     # 3г. помощник интерфейса (Qt: значок, меню, уведомления) — если есть в
-    #     комплекте. Он ОТДЕЛЬНАЯ программа: кладём рядом с программой, чтобы
-    #     её нашли и --ensure (задача Планировщика), и сам супервизор.
+    #     комплекте. Windows «один файл»: помощник ВСТРОЕН в программу и
+    #     распаковывается в постоянный каталог со сверкой SHA-256 (ui_bundle).
+    #     Старый путь (копия из комплекта/репозитория) остаётся для Linux и для
+    #     ручной двухфайловой установки.
     try:
+        import ui_bundle as UB
         import ui_helper as UH
         name = UH.helper_name()
-        if UH.helper_path(cfg):
+        if UB.available():
+            dst = UB.ensure(cfg, force=True)
+            if dst:
+                lg.info(f"  помощник интерфейса распакован из встроенного: {dst} "
+                        f"({os.path.getsize(dst)} байт, SHA-256 "
+                        f"{UB.sha256_file(dst)[:12]})")
+            else:
+                lg.warn("  помощник интерфейса: встроенный не распакован — "
+                        "интерфейс даст встроенный значок")
+        elif UH.helper_path(cfg):
             lg.info(f"  помощник интерфейса уже на месте: {UH.helper_path(cfg)}")
         else:
             cands = []

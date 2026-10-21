@@ -1440,11 +1440,52 @@ def restore_system_proxy(cfg: dict) -> bool:
     return True
 
 
+_SP_NOTES = {}
+
+
+def _sys_proxy_supported() -> tuple:
+    """(можно ли вообще управлять прокси ОС, причина). POSIX подменяет свою.
+
+    На Windows механизм всегда есть (реестр WinINET). На Linux прокси — это
+    настройка рабочего стола, и в службе без сеанса пользователя её может не
+    быть: тогда программа обязана сказать об этом ОДИН раз и не долбить систему
+    каждые 30-60 секунд (см. clientwrite_posix._posix_sys_proxy_supported).
+    """
+    return True, ""
+
+
+def _sp_note(key: str, level: str, msg: str, ttl: float = 1800.0) -> bool:
+    """Служебное сообщение о системном прокси — не чаще раза в ``ttl`` секунд."""
+    now = time.time()
+    prev = _SP_NOTES.get(key)
+    if prev is not None and now - prev < ttl:
+        return False
+    _SP_NOTES[key] = now
+    try:
+        getattr(log.get_logger(), level if level in ("info", "warn", "error")
+                else "info")(msg)
+    except Exception:
+        pass
+    return True
+
+
+def reset_sys_proxy_notes() -> None:
+    """Забыть «уже сообщали» (проверки, смена состояния)."""
+    _SP_NOTES.clear()
+
+
 def ensure_system_proxy(client: dict, cfg: dict) -> bool:
     """Системный прокси должен смотреть на наш порт.
 
     Вызывается из ensure_balancer ДО всех ранних return. В режиме v2rayn не
     вмешивается при живом GUI v2rayN (это его забота).
+
+    Три исхода, и все — не ошибка:
+      * прокси уже наш — True, молча;
+      * механизма нет (Linux без сеанса пользователя, неизвестный рабочий
+        стол) — одна честная строка в журнал и True: «не наше дело», а не
+        ERROR каждые полминуты;
+      * поставили — одна строка на СМЕНУ значения, а не на каждый вызов.
     """
     lg = log.get_logger()
     if proxy_off(cfg):
@@ -1453,6 +1494,12 @@ def ensure_system_proxy(client: dict, cfg: dict) -> bool:
         return True
     if str(client.get("mode")) == "v2rayn":
         return _v2().ensure_system_proxy(client, cfg)
+    ok_av, why = _sys_proxy_supported()
+    if not ok_av:
+        _sp_note("unavailable:" + str(why), "info",
+                 f"Системный прокси: управление недоступно — {why}. Программа "
+                 f"работает на своём порту; прокси в браузере задайте вручную")
+        return True
     port = int(client.get("socks_port", DEFAULT_SOCKS_PORT))
     want = f"127.0.0.1:{port}"
     en, srv = _sys_proxy_state()
@@ -1460,10 +1507,13 @@ def ensure_system_proxy(client: dict, cfg: dict) -> bool:
         return True
     save_proxy_orig(cfg)      # запомнить исходное состояние (один раз)
     if _sys_proxy_apply(want):
-        lg.warn(f"Системный прокси был {'включён на ' + (srv or '—') if en else 'ВЫКЛЮЧЕН'} — "
-                f"включил на {want}")
+        _sp_note("on:" + want, "info",
+                 f"Системный прокси переведён на {want} "
+                 f"(был {'включён на ' + (srv or '—') if en else 'выключен'})")
         return True
-    lg.error("не удалось включить системный прокси")
+    _sp_note("fail:" + want, "warn",
+             "не удалось включить системный прокси — браузеру задайте прокси "
+             "вручную (подробности — в строках «Системный прокси» выше)")
     return False
 
 

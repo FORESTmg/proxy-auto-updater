@@ -4,6 +4,152 @@ All notable changes to **FOREST's Proxy Auto-updater** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] — 2026-10-21
+
+Linux-only fixes: four defects found on a live CachyOS (KDE Plasma Wayland,
+package 1.3.1). On the Windows side the behaviour of the program itself is
+unchanged; the **packaging** changed — the interface helper is now embedded and
+Windows ships as **one** file (see the last sections of this release).
+
+### Fixed
+
+- **Every Cyrillic message turned into `?????` in `journalctl`.** The journal
+  (`StandardOutput=journal`) received the program's stdout, and stdout went
+  through `safestdio.say()`, which encoded the line with
+  `ascii + errors="replace"` — a Windows-era guard against a modal PyInstaller
+  window on a cp1251 console. On Linux there is no such console: journald wants
+  UTF-8, so the guard mangled every Russian line while the UTF-8 file log stayed
+  correct (hence "the file is fine, the journal is unreadable"). `say()` now
+  prints UTF-8 on POSIX (and on Windows only when the stream is already UTF-8),
+  keeps the ASCII fallback for the cp1251/windowed build, and can be forced back
+  with `FOREST_STDOUT_ASCII=1`. Measured in WSL: `?????` in journal = **0**,
+  Russian lines readable under `LANG=C.UTF-8`, `LC_ALL=C`,
+  `PYTHONCOERCECLOCALE=0`, `PYTHONUTF8=0` and a koi8-r `LANG`; the log file is
+  valid UTF-8 in every case.
+- **KDE Plasma was detected as GNOME, so the system proxy was set by the wrong
+  mechanism every 30–60 s.** The old test for "this is GNOME" was "gsettings
+  exists" — it exists on KDE too (glib2), so a Plasma session took the GNOME
+  branch. Three things were wrong and are fixed by `desktop_env.py`:
+  (1) the desktop is now detected explicitly (`XDG_CURRENT_DESKTOP`,
+  `KDE_FULL_SESSION`, `DESKTOP_SESSION`, and — when the environment is empty,
+  which is the case for a system service — by looking at `kwin_wayland` /
+  `plasmashell` / `gnome-shell` processes);
+  (2) **the write is verified by reading it back**: a system service runs as
+  root without a session bus, so GSettings falls back to the `memory` backend,
+  `set` returns success and nothing is stored — that is exactly why the same
+  "proxy enabled" warning repeated forever; KDE is now configured through
+  `kioslaverc` (`kwriteconfig6/5` + the KIO reparse signal) in the *user's*
+  session (root → `runuser -u`), and GNOME-like desktops through GSettings, both
+  read back and compared with the wanted `host:port`;
+  (3) when there is no session or no common mechanism (i3, sway, container,
+  WSL) the program says so **once** and stops retrying every cycle (the desktop
+  /session is re-checked every 10 minutes). `gsettings` is still written on KDE
+  as well, because Chromium/Electron/GTK read GSettings regardless of the
+  desktop.
+- **The journal repeated the same warning dozens of times.** Identical messages
+  are now de-duplicated in `log.py` (default window 60 s,
+  `FOREST_LOG_DEDUPE_S`), and the suppressed count is appended to the next
+  identical line (`… [повторилось 124 раз(а) за 60 с]`), so no information is
+  lost. A live 150-second run of the real supervisor in WSL: 59 journal lines,
+  **0** `?????`, and each of the recurring watch messages appears **once**
+  instead of 124 times.
+- **`WARN Кандидатов > 400; взято 400` looked like an alarm.** It is the
+  normal `test.max_candidates` load limit, and `WARN Добавлен резерв по RTT:
+  +18 (итого 30)` is the normal top-up when the strict selection yields fewer
+  than `reserve_min` nodes. Both are now `INFO` and say so in words
+  (`Кандидатов больше лимита test.max_candidates (400) — на тест беру 400
+  (лимит задаётся в config.json, не ошибка)`).
+- **Right-clicking the tray icon showed the panel's stock menu instead of ours
+  (and on KDE Wayland — nothing at all).** In the StatusNotifier protocol the
+  panel owns the right click: it asks the application for a menu description
+  (`com.canonical.dbusmenu`) and draws it itself, so the helper used to hand a
+  real `QMenu` to the tray (`QSystemTrayIcon.setContextMenu`) — and on
+  **XEmbed** panels (XFCE, MATE, Cinnamon, LXQt) that same `QMenu` was what Qt
+  popped up instead of our animated window. The `QMenu` is gone: on XEmbed the
+  right click (`ActivationReason.Context`) now opens **our** `ui_menu.PopupMenu`
+  at the icon geometry, exactly as on Windows, and the left click still opens
+  nothing. For StatusNotifier panels (KDE Plasma), where the panel keeps the
+  right click for itself, the same package now ships a **panel widget
+  (plasmoid)** — `plasma/plasmoid/org.forest.proxyupdater` installed into
+  `/usr/share/plasma/plasmoids/`: it draws our icon with the state colour read
+  from `tray_status.json` and runs the new `forest-ui --menu-popup [x y]`
+  (a process with no second tray icon) that shows **our** menu. On Plasma the
+  widget may still get the right click taken by the panel's own widget menu;
+  `Ctrl+left click` opens our menu as the documented fallback.
+- **A missing Qt (e.g. no `libglvnd`) crashed the helper with a PyInstaller
+  traceback instead of the clear "Qt unavailable" exit.** `import ui_style as US`
+  sat inside `if QT_OK:`, while the module-level `NT_* = US.*` block below ran
+  unconditionally — without Qt the import of `forest_ui` died with
+  `NameError: name 'US' is not defined`. `ui_style` is pure stdlib, so it is now
+  imported outside the guard: the helper prints
+  `forest-ui: Qt недоступен (…) — помощник не запущен` and exits with code 3,
+  which is what `src/ui_helper.py` already expects. `libglvnd` stays in
+  `optdepends` (now with the consequence spelled out) — the program itself works
+  without it, only the tray helper degrades.
+
+### Verified
+
+- WSL Ubuntu: `linux/posix_selftest.py` — 89 checks, all green (desktop
+  detection for KDE/GNOME/empty/Cinnamon/mixed `KDE:GNOME`, `/proc` session
+  scan, `kioslaverc` write→readback→disable round-trip, one-line reporting for
+  an unavailable mechanism, log de-duplication, UTF-8 `say()` and log file).
+- WSL Ubuntu: a real 150-second `--run` with the real Xray core, stdout piped to
+  `systemd-cat`: 59 journal lines, **0** `?????`, 57 lines with Cyrillic, no
+  repeating warnings.
+- Windows: `v2ray_updater.py --selftest` — PASSED; `forest_ui.py --selftest` —
+  144 checks, 0 failures (right-click still opens the custom menu there, no
+  `QMenu` is set on Windows).
+- Qt branch of the tray menu (Linux code path) — on Qt 6.9 with
+  `os.name="posix"`: the `QMenu` carries 12 items, both submenus, and a click on
+  "Обновить серверы сейчас"/"РФ напрямую" reaches the application
+  (`packaging/check_linux_tray.py`).
+
+### Not verified
+
+- The real DBusMenu round-trip to a KDE panel (needs a live Plasma session) —
+  the user checks it on the VM after rebuilding.
+
+### Packaging (Windows): one file instead of two
+
+- **The interface helper is now embedded in `ForestProxyUpdater.exe`.** A Windows
+  user downloads **one** file: `forest-ui.exe` (tray icon, menu, notifications,
+  ~36 MB) travels inside the main `.exe` as bundle data
+  (`ui_bundle/forest-ui.exe` + `ui_bundle/ui-bundle.json`) instead of being a
+  second asset. The helper is still built as its own artifact
+  (`packaging/build-ui.ps1`, `forest-ui.spec`) — Linux and manual installs are
+  unchanged, and `build.ps1` embeds whatever `dist/forest-ui.exe` currently is
+  (staleness against `src/forest_ui.py` is reported as a warning, not silently
+  ignored).
+- **Unpacking with a SHA-256 check** (`src/ui_bundle.py`): on `--run`/`--ensure`/
+  `--install` the program compares `<root>/forest-ui.exe` with the expected hash
+  from the embedded manifest. Match — nothing is copied (a log line, ~0.05 s).
+  Mismatch or missing — copy to `.new-<pid>`, verify the **copy's** hash,
+  `os.replace`, verify the hash of what is now on disk, then launch. A helper that
+  is running (file locked) or an unwritable folder never turns into an error
+  dialog: the program logs one line and works with the built-in tray icon.
+- Measured on a live PC, isolated sandbox (`FOREST_ROOT`, ports 118xx, system
+  proxy off, cycles off): cold start **3.9 s** in total, of which unpacking
+  **0.20 s**; helper SHA-256 `3c7d1900…` identical to the embedded one; the
+  process runs from the permanent folder, not from `_MEI`; second start **2.35 s**
+  with no re-copy (same mtime), `копия на месте и совпадает по SHA-256` in the
+  log; deleting `forest-ui.exe` restores it on the next start. With the target
+  deliberately blocked: no crash, no window, built-in icon, one log line.
+- Windows `--selftest` on the built exe (console variant): 238 checks, PASSED.
+- Size: **68 207 911 bytes (65.05 MiB)**, sha256 `06d46544…` — was 30.8 MB +
+  37.7 MB as two files.
+
+### Not verified (Windows one-file packaging)
+
+- The helper embedded here is the binary built before the in-progress menu/tray
+  edits (`src/forest_ui.py` is being changed separately); the release build picks
+  up whatever `dist/forest-ui.exe` is current, so rebuilding the helper is
+  required before publishing.
+- SmartScreen/antivirus behaviour of the 65 MB one-file build (no signed binary).
+- Upgrade over a **running** two-file 1.3.1 install: the replacement is designed
+  to be skipped while `forest-ui.exe` is locked (the old copy keeps running and
+  the new one lands on the next start), checked only by simulating a blocked
+  target, not by upgrading a live installation.
+
 ## [1.3.1] — 2026-10-21
 
 ### Fixed

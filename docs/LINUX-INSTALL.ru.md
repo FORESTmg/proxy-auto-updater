@@ -18,27 +18,41 @@ possible. If something does not work, please report it in the repository.
 
 **ВИД МЕНЮ ТРЕЯ НА LINUX (честно).** Меню трея — своё окно (`src/ui_menu.py`,
 Qt.Popup, стиль карточки: цвета/геометрия/кривые из общего `src/ui_style.py`,
-анимация появления, подсветка строки, галочки, выезд подменю). Рисуем его **мы
-сами**, поэтому при работе через **системный протокол трея**
-(StatusNotifier/AppIndicator, поверх которого стоит `QSystemTrayIcon`)
-контекстное меню рисует **панель рабочего стола** — KDE Plasma, GNOME, XFCE:
-свои шрифты, отступы, скругления и своя анимация. Наш стиль там примениться не
-может, как и у карточки уведомления, где на Linux остаётся системное
-уведомление. Наш вид меню действует там, где меню рисуем мы (Windows и наш
-собственный трей без системного протокола); код общий, но на живом рабочем
-столе Linux он не проверялся — проверен только логически.
+анимация появления, подсветка строки, галочки, выезд подменю). Видно ли его,
+зависит от механизма трея:
+
+* **XEmbed-панели** (XFCE, MATE, Cinnamon, LXQt): правый клик доходит до
+  программы, поэтому открывается **наше окно меню**, 1:1 как в Windows. `QMenu`
+  трею больше не отдаётся — именно из-за него панель показывала штатное меню Qt;
+* **KDE Plasma (StatusNotifier)**: правый клик забирает панель, поэтому в пакете
+  едет **плазмоид** (`/usr/share/plasma/plasmoids/org.forest.proxyupdater`): он
+  рисует нашу иконку с цветом состояния и открывает **наше** меню
+  (`forest-ui --menu-popup`). Добавить: правый клик по панели → «Добавить
+  виджеты…» → «FOREST Proxy Updater».
+
+Левый клик не открывает меню нигде. Если Plasma оставляет правый клик за меню
+виджета — используйте **Ctrl+левый клик**. На живом рабочем столе Linux не
+проверялось: логика меню и синтаксис QML проверены, панели — нет.
 
 **MENU LOOK ON LINUX (honest).** The tray menu is our own window
 (`src/ui_menu.py`, Qt.Popup, the notification card's style: colors/geometry/curves
 come from the shared `src/ui_style.py`, plus the entrance animation, row
-highlight, checkmarks and submenu slide-out). We draw it ourselves, so when the
-tray works through the **system protocol** (StatusNotifier/AppIndicator, which
-`QSystemTrayIcon` sits on) the context menu is drawn by the **desktop panel** —
-KDE Plasma, GNOME, XFCE: its own fonts, paddings, radii and animation. Our style
-cannot apply there, exactly as with the notification card, where Linux keeps the
-system notification. Our menu look works wherever we draw the menu (Windows and
-our own tray without the system protocol); the code is shared, but it has not been
-verified on a live Linux desktop — only logically.
+highlight, checkmarks and submenu slide-out). Whether you see it depends on the
+tray backend:
+
+* **XEmbed panels** (XFCE, MATE, Cinnamon, LXQt): the right click reaches the
+  application, so you get **our menu window**, 1:1 with Windows. No `QMenu` is
+  handed to the tray any more — that was why the panel used to show Qt's stock
+  menu;
+* **KDE Plasma (StatusNotifier)**: the panel owns the right click, so the package
+  ships a **plasmoid** (`/usr/share/plasma/plasmoids/org.forest.proxyupdater`)
+  that draws our icon with the state colour and opens **our** menu
+  (`forest-ui --menu-popup`). Add it: right-click the panel → *Add Widgets…* →
+  *FOREST Proxy Updater*.
+
+The left click opens nothing anywhere. If Plasma keeps the right click for the
+widget's own context menu, use **Ctrl+left click**. Not verified on a live Linux
+desktop — menu logic and QML syntax are checked, the panels are not.
 
 Оглавление
 

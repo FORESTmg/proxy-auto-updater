@@ -38,8 +38,23 @@ possible. If something does not work, please report it in the repository.
 | Состояние, кэши, сторожевые файлы | `/var/lib/forest-proxy-updater/state/forest-proxy-updater/` |
 | Логи | `/var/lib/forest-proxy-updater/state/forest-proxy-updater/logs/main.log` и journal |
 | Юниты systemd | `/usr/lib/systemd/system/forest-proxy-updater*.{service,timer}` |
+| Плазмоид KDE (значок в панели Plasma + наше меню) | `/usr/share/plasma/plasmoids/org.forest.proxyupdater/` |
 | Лицензия GPL-3.0 | `/usr/share/licenses/forest-proxy-updater/COPYING` |
 | Документация | `/usr/share/doc/forest-proxy-updater/` |
+
+## Значок в панели KDE (плазмоид)
+
+В KDE Plasma правый клик по значку трея забирает сама панель (протокол
+StatusNotifier), поэтому в пакет входит наш плазмоид — он рисует иконку с цветом
+состояния и по клику открывает **наше** меню программы:
+
+1. правый клик по панели → **«Добавить виджеты…»**;
+2. найти **«FOREST Proxy Updater»** (можно набрать `forest` в поиске);
+3. перетащить на панель.
+
+Кнопки: правая — наше меню, левая — ничего, **Ctrl+левая** — наше меню (запасной
+путь, если ваша панель оставляет правый клик за меню виджета). Отдельный пакет
+для плазмоида не нужен.
 
 ## Служба
 

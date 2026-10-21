@@ -34,8 +34,8 @@ import sys
 import time
 import traceback
 
-__all__ = ["safe_stdio", "say", "log_dir", "write_report", "crash_log",
-           "install_excepthook", "guarded"]
+__all__ = ["safe_stdio", "say", "unicode_stdout", "log_dir", "write_report",
+           "crash_log", "install_excepthook", "guarded"]
 
 
 class _NullWriter:
@@ -67,6 +67,9 @@ class _NullWriter:
 
 
 _ORIG_ENCODING = "ascii"      # кодировка stdout ДО перевода в utf-8
+# Может ли stdout принимать не-ASCII БЕЗ порчи текста (utf-8).
+# None — ещё не решали; вычисляется в :func:`safe_stdio`/первом :func:`say`.
+_UNICODE_OUT = None
 
 
 def safe_stdio() -> None:
@@ -76,7 +79,8 @@ def safe_stdio() -> None:
     по ней :func:`say` решает, можно ли вообще печатать не-ASCII (на Linux-терминале
     в UTF-8 — да; на оконной сборке Windows с cp1251 — нет, там будет ``?``).
     """
-    global _ORIG_ENCODING
+    global _ORIG_ENCODING, _UNICODE_OUT
+    _UNICODE_OUT = None            # пересчитать по новому потоку
     for name in ("stdout", "stderr"):
         try:
             st = getattr(sys, name, None)
@@ -98,21 +102,55 @@ def safe_stdio() -> None:
                 pass
 
 
+def unicode_stdout() -> bool:
+    """Принимает ли stdout UTF-8 без порчи текста (Linux/journald — да).
+
+    Решение принимается по кодировке, которая была у потока ДО перевода в
+    utf-8 (:data:`_ORIG_ENCODING`), и по ОС:
+
+    * POSIX — всегда да: терминал и journald ждут UTF-8, а система сама
+      выставляет ``LANG``/``C.UTF-8`` (PEP 538). Именно поэтому кириллица в
+      журнале раньше превращалась в ``?????`` — кодировка тут ни при чём,
+      виновата была ASCII-обёртка ниже;
+    * Windows — только если поток уже был в UTF-8 (например перенаправлен в
+      файл). Оконная сборка PyInstaller без консоли «печатает» в cp1251, и
+      русский текст там дал бы мусор, поэтому остаётся ASCII-замена ``?``.
+
+    Аварийный выключатель (если чей-то приёмник ломается на UTF-8):
+    ``FOREST_STDOUT_ASCII=1`` — вернуть прежнее поведение.
+    """
+    global _UNICODE_OUT
+    if _UNICODE_OUT is not None:
+        return bool(_UNICODE_OUT)
+    flag = str(os.environ.get("FOREST_STDOUT_ASCII") or "").strip().lower()
+    if flag in ("1", "true", "yes", "on"):
+        _UNICODE_OUT = False
+        return False
+    if os.name != "nt":
+        _UNICODE_OUT = True
+        return True
+    enc = str(_ORIG_ENCODING or "").lower().replace("-", "").replace("_", "")
+    _UNICODE_OUT = enc.startswith("utf8")
+    return bool(_UNICODE_OUT)
+
+
 def say(text="") -> None:
-    """Печать в stdout ТОЛЬКО ASCII. НИКОГДА не бросает исключения.
+    """Печать в stdout. НИКОГДА не бросает исключения.
 
-    В собранном приложении печатать не-ASCII в стандартный вывод нельзя: у
-    оконной сборки консоли нет, а её «кодировка» на Windows — cp1251, и символ
-    вне cp1251 (например «✓») давал UnicodeEncodeError с МОДАЛЬНЫМ ОКНОМ
-    PyInstaller на рабочем столе. Здесь не-ASCII заменяется на ``?`` — упасть
-    невозможно в принципе.
+    UTF-8 там, где поток его понимает (Linux: терминал и journald — journalctl
+    показывает русские строки как есть), и ASCII-замена ``?`` там, где нет
+    (оконная сборка Windows с cp1251: не-ASCII в ``print()`` давал
+    UnicodeEncodeError и МОДАЛЬНОЕ ОКНО PyInstaller на рабочем столе).
+    Упасть невозможно в принципе: любая ошибка записи проглатывается.
 
-    Человекочитаемый текст (русский) пишется в UTF-8-ФАЙЛЫ:
+    Человекочитаемый текст дополнительно пишется в UTF-8-ФАЙЛЫ:
     :func:`write_report`, ``state/status.txt``, ``state/ui_selftest.txt``,
     журнал программы.
     """
     try:
-        line = str(text).encode("ascii", "replace").decode("ascii")
+        line = str(text)
+        if not unicode_stdout():
+            line = line.encode("ascii", "replace").decode("ascii")
         out = getattr(sys, "stdout", None)
         if out is None:
             return

@@ -20,7 +20,7 @@ REPO_DIR="$(dirname "$PACKAGING_LINUX_DIR")"
 
 # ── версия и имена ──────────────────────────────────────────────────────────
 APP=forest-proxy-updater
-VERSION="${FOREST_PKG_VERSION:-1.3.1}"
+VERSION="${FOREST_PKG_VERSION:-1.3.2}"
 RELEASE="${FOREST_PKG_RELEASE:-1}"          # номер выпуска пакета (.rpm/.pkg)
 SUMMARY="Auto-updating proxy supervisor built on top of the Xray core"
 HOMEPAGE="https://github.com/FORESTmg/proxy-auto-updater"
@@ -45,6 +45,13 @@ UI_ELF="${FOREST_UI_ELF:-$REPO_DIR/linux/dist/$UI_NAME}"
 ICON_PNG="$PACKAGING_LINUX_DIR/icons/$APP.png"
 DESKTOP_SRC="$PACKAGING_LINUX_DIR/system/$APP.desktop"
 DESKTOP_UI_SRC="$PACKAGING_LINUX_DIR/system/$APP-ui.desktop"
+# Плазмоид KDE: настоящая иконка в панели Plasma, открывает НАШЕ меню
+# (панель KDE забирает правый клик по значку StatusNotifier, поэтому своё окно
+# там показать нечем — см. plasma/plasmoid/.../contents/ui/main.qml).
+# Он едет В ТОМ ЖЕ пакете: отдельный пакет плодил бы лишнюю установку.
+PLASMOID_ID="org.forest.proxyupdater"
+PLASMOID_SRC="$REPO_DIR/plasma/plasmoid/$PLASMOID_ID"
+PLASMOID_DEST="$PREFIX/share/plasma/plasmoids/$PLASMOID_ID"
 UNIT_SRC_DIR="$PACKAGING_LINUX_DIR/system"
 EXAMPLE_CONFIG="$REPO_DIR/config.example.json"
 LICENSE_FILE="$REPO_DIR/LICENSE"
@@ -142,6 +149,22 @@ stage_payload() {
         sed -e "s|@EXEC@|$LIBDIR/$UI_NAME|g" -e "s|@APP@|$APP|g" \
             "$DESKTOP_UI_SRC" > "$root$PREFIX/share/applications/$APP-ui.desktop"
         chmod 0644 "$root$PREFIX/share/applications/$APP-ui.desktop"
+    fi
+
+    # 2в. плазмоид KDE: иконка в панели Plasma + НАШЕ меню по клику.
+    #     Раскладка ровно та, которую ждёт KPackage: metadata.json +
+    #     contents/ui/main.qml + contents/code/read-state.sh.
+    if [ -d "$PLASMOID_SRC" ]; then
+        install -d "$root$PLASMOID_DEST/contents/ui" "$root$PLASMOID_DEST/contents/code"
+        install -m 0644 "$PLASMOID_SRC/metadata.json" \
+            "$root$PLASMOID_DEST/metadata.json"
+        install -m 0644 "$PLASMOID_SRC/contents/ui/main.qml" \
+            "$root$PLASMOID_DEST/contents/ui/main.qml"
+        install -m 0755 "$PLASMOID_SRC/contents/code/read-state.sh" \
+            "$root$PLASMOID_DEST/contents/code/read-state.sh"
+        say "плазмоид KDE: $PLASMOID_DEST"
+    else
+        warn "нет $PLASMOID_SRC — пакет будет без значка в панели KDE"
     fi
 
     # 3. системные юниты (пути уже подставлены)

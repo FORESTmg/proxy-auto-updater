@@ -39,6 +39,18 @@ _ICON = os.path.join(_HERE, "app.ico")
 _VERSION = os.path.join(_HERE, "version_info.txt")
 _EXAMPLE = os.path.join(_REPO, "config.example.json")
 
+# ── встроенный помощник интерфейса (ОДИН exe для пользователя) ──
+# forest-ui.exe (Qt: значок в трее, меню, уведомления) больше НЕ отдельный файл
+# для скачивания на Windows: он лежит внутри основного .exe как данные
+# (`ui_bundle/forest-ui.exe`) и при первом запуске распаковывается в постоянный
+# каталог установки со сверкой SHA-256 (см. src/ui_bundle.py). Помощник при этом
+# остаётся САМОСТОЯТЕЛЬНЫМ артефактом сборки (forest-ui.spec / build-ui.ps1):
+# тот же файл нужен для Linux и для ручной установки.
+# Путь можно задать явно: FOREST_HELPER_EXE=...\forest-ui.exe
+_HELPER_NAME = "forest-ui.exe"
+_HELPER = os.environ.get("FOREST_HELPER_EXE") or os.path.join(_HERE, "dist",
+                                                             _HELPER_NAME)
+
 # ── обязательные входы: падаем рано и понятно, а не «странным» exe ──
 _required = {
     "src/v2ray_updater.py": os.path.join(_SRC, "v2ray_updater.py"),
@@ -51,6 +63,9 @@ for _f in ("xray.exe", "geoip.dat", "geosite.dat", "LICENSE"):
         os.path.join(_VENDOR, _f)
 
 _missing = [k for k, v in _required.items() if not os.path.isfile(v)]
+if not os.path.isfile(_HELPER):
+    _missing.append("dist/%s  (powershell -File packaging/build-ui.ps1)"
+                    % _HELPER_NAME)
 if _missing:
     raise SystemExit("Не хватает входных файлов для сборки:\n  - "
                      + "\n  - ".join(_missing))
@@ -62,7 +77,8 @@ HIDDEN = [
     "config", "i18n", "log", "netfilters", "notify", "parser", "selftest",
     "safestdio", "sources", "theme", "tray", "tray_check", "tray_icon",
     "tray_menu",
-    "instancelock", "tray_status", "v2ray_updater", "watch", "watchdog",
+    "instancelock", "tray_status", "ui_bundle", "ui_helper", "ui_cmd",
+    "v2ray_updater", "watch", "watchdog",
     "xraytest",
 ]
 
@@ -77,6 +93,50 @@ if os.path.isfile(_ICON):
     DATAS.append((_ICON, "."))
 else:
     raise SystemExit("Не хватает иконки: " + _ICON + " (положите свой app.ico)")
+
+# ── встроенный помощник + манифест ──
+# Манифест — единственный источник ожидаемого SHA-256: его пишет СБОРКА из того
+# самого файла, который упаковывается. При запуске ui_bundle сверяет с ним
+# распакованную копию и не распаковывает ничего, если хеш совпал.
+import hashlib
+import json
+import re
+
+
+def _sha256(p):
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+try:
+    with open(_VERSION, encoding="utf-8") as _f:
+        _vi = _f.read()
+    _ver = (re.search(r"u?'ProductVersion',\s*u?'([0-9.]+)'", _vi)
+            or re.search(r"prodvers=\(([0-9, ]+)\)", _vi))
+    _ver = ((".".join(_ver.group(1).replace(" ", "").split(","))
+             if _ver and "," in _ver.group(1) else _ver.group(1))
+            if _ver else "")
+except Exception:
+    _ver = ""
+
+_HELPER_SHA = _sha256(_HELPER)
+_HELPER_SIZE = os.path.getsize(_HELPER)
+_MANIFEST = os.path.join(_HERE, "dist", "ui-bundle.json")
+with open(_MANIFEST, "w", encoding="utf-8") as _f:
+    json.dump({
+        "name": _HELPER_NAME,
+        "version": _ver,
+        "sha256": _HELPER_SHA,
+        "size": _HELPER_SIZE,
+        "source": os.path.abspath(_HELPER),
+    }, _f, ensure_ascii=False, indent=2)
+DATAS.append((_HELPER, "ui_bundle"))
+DATAS.append((_MANIFEST, "ui_bundle"))
+print("[spec] встроенный помощник: %s (%d байт, sha256 %s, версия %s)"
+      % (_HELPER, _HELPER_SIZE, _HELPER_SHA[:12], _ver or "?"))
 
 # Отладочная сборка с консолью (FOREST_CONSOLE_BUILD=1): тогда ошибки
 # bootloader'а (например, неудалённый _MEI) печатаются в stderr, а НЕ показываются

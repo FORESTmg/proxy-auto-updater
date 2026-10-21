@@ -45,8 +45,12 @@ depends=('curl'
          'libxcb')
 # libGL/libEGL нужны GL-интеграции xcb (Qt грузит их динамически): без драйвера
 # помощник рисует программно, но с ним — как на обычном рабочем столе.
-optdepends=('libglvnd: GL/EGL для GL-интеграции xcb (иначе программная отрисовка)'
-            'mesa: программный GL-драйвер (llvmpipe) для машин без видеодрайвера')
+# ВАЖНО: без libglvnd/libEGL плагин xcb не загружается вовсе, Qt «недоступен»,
+# и помощник честно выходит с кодом 3 («Qt недоступен») — интерфейса не будет,
+# сама программа работает. Поэтому зависимость объявлена в optdepends.
+optdepends=('libglvnd: GL/EGL для GL-интеграции xcb (иначе помощник выйдет с кодом 3 «Qt недоступен» и значка в трее не будет)'
+            'mesa: программный GL-драйвер (llvmpipe) для машин без видеодрайвера'
+            'plasma-workspace: панель KDE Plasma — для нашего плазмоида (значок в панели + меню)')
 install=forest-proxy-updater.install
 options=('!strip' '!emptydirs' '!debug')
 
@@ -71,12 +75,16 @@ source=('forest-proxy-updater'
         'forest-ui'
         'forest-proxy-updater.desktop'
         'forest-proxy-updater-ui.desktop'
-        'forest-proxy-updater.png')
+        'forest-proxy-updater.png'
+        'plasmoid-metadata.json'
+        'plasmoid-main.qml'
+        'plasmoid-read-state.sh')
 
 sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP'
             'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP'
             'SKIP' 'SKIP'
-            'SKIP' 'SKIP' 'SKIP' 'SKIP')
+            'SKIP' 'SKIP' 'SKIP' 'SKIP'
+            'SKIP' 'SKIP' 'SKIP')
 
 package() {
   # Программа: PyInstaller-onefile ELF, ядро xray и гео-базы внутри.
@@ -121,4 +129,13 @@ package() {
       "$pkgdir/usr/share/applications/forest-proxy-updater-ui.desktop"
   install -Dm644 "$srcdir/forest-proxy-updater.png" \
       "$pkgdir/usr/share/icons/hicolor/256x256/apps/forest-proxy-updater.png"
+
+  # Плазмоид KDE: настоящая иконка в панели Plasma, по клику — НАШЕ меню
+  # (forest-ui --menu-popup). Раскладка KPackage: metadata.json + contents/.
+  install -Dm644 "$srcdir/plasmoid-metadata.json" \
+      "$pkgdir/usr/share/plasma/plasmoids/org.forest.proxyupdater/metadata.json"
+  install -Dm644 "$srcdir/plasmoid-main.qml" \
+      "$pkgdir/usr/share/plasma/plasmoids/org.forest.proxyupdater/contents/ui/main.qml"
+  install -Dm755 "$srcdir/plasmoid-read-state.sh" \
+      "$pkgdir/usr/share/plasma/plasmoids/org.forest.proxyupdater/contents/code/read-state.sh"
 }

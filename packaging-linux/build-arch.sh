@@ -81,6 +81,11 @@ install -m 0644 "$STAGE$PREFIX/share/applications/$APP-ui.desktop" \
                                                   "$SRC/forest-proxy-updater-ui.desktop"
 install -m 0644 "$STAGE$PREFIX/share/icons/hicolor/256x256/apps/$APP.png" \
                                                   "$SRC/forest-proxy-updater.png"
+# Плазмоид KDE — тоже «плоско» (раскладку собирает package() из PKGBUILD).
+install -m 0644 "$STAGE$PLASMOID_DEST/metadata.json"         "$SRC/plasmoid-metadata.json"
+install -m 0644 "$STAGE$PLASMOID_DEST/contents/ui/main.qml"  "$SRC/plasmoid-main.qml"
+install -m 0755 "$STAGE$PLASMOID_DEST/contents/code/read-state.sh" \
+                                                  "$SRC/plasmoid-read-state.sh"
 # версия из окружения (если переопределена)
 sed -i "s|^pkgver=.*|pkgver=$VERSION|; s|^pkgrel=.*|pkgrel=$RELEASE|" "$SRC/PKGBUILD"
 say "PKGBUILD: $SRC/PKGBUILD (pkgver=$VERSION, pkgrel=$RELEASE)"

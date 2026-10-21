@@ -25,6 +25,8 @@ import subprocess
 import sys
 import time
 
+import ui_bundle as UB
+
 IS_WIN = sys.platform.startswith("win")
 NAME_WIN = "forest-ui.exe"
 NAME_POSIX = "forest-ui"
@@ -100,14 +102,38 @@ def _exists(p: str) -> bool:
         return False
 
 
-def helper_path(cfg: dict) -> str:
-    """Где искать помощника (первым — явный путь из конфига). -> '' если нет."""
+def _explicit_path(cfg: dict) -> str:
+    """Явный путь помощника из конфига (``ui.helper_exe``/``ui.helper``).
+
+    Это РУЧНОЙ выбор пользователя: если файл есть, он главнее всего остального
+    (в том числе встроенного в один .exe помощника) — иначе настройка не работала
+    бы и человек не мог бы подменить интерфейс.
+    """
     cfgu = (cfg or {}).get("ui") or {}
-    cands = []
     for k in ("helper_exe", "helper"):
         v = str(cfgu.get(k) or "")
         if v and v.lower() not in ("auto", "on", "off", "true", "false"):
-            cands.append(v)
+            if _exists(v):
+                return v
+    return ""
+
+
+def helper_path(cfg: dict) -> str:
+    """Где искать помощника. -> '' если файла нет ни в одном месте.
+
+    Порядок: явный путь из конфига -> постоянный каталог встроенного помощника
+    (``<root>/forest-ui.exe``; туда его распаковывает ``ui_bundle.ensure``) ->
+    рядом с программой (ручная/двухфайловая установка) -> каталог распаковки
+    пакета -> корень из конфига.
+    """
+    ex = _explicit_path(cfg)
+    if ex:
+        return ex
+    cands = []
+    try:
+        cands.append(UB.target_path(cfg))
+    except Exception:
+        pass
     try:
         cands.append(os.path.join(os.path.dirname(os.path.abspath(sys.executable)),
                                   helper_name()))
@@ -139,10 +165,24 @@ def dev_script() -> str:
 
 
 def command(cfg: dict) -> list:
-    """Команда запуска помощника. -> [] если запускать нечего."""
-    exe = helper_path(cfg)
-    if exe:
-        return [exe]
+    """Команда запуска помощника. -> [] если запускать нечего.
+
+    Windows-сборка «один файл»: помощник лежит ВНУТРИ программы. Перед запуском
+    он приводится к встроенной версии — ``ui_bundle.ensure`` сверяет SHA-256 и,
+    только если копия отличается/отсутствует, распаковывает её в постоянный
+    каталог. Не вышло — команды нет, и программа тихо живёт со встроенным
+    значком (никаких окон).
+    """
+    ex = _explicit_path(cfg)
+    if ex:
+        return [ex]
+    if UB.available() or UB.is_current(cfg):
+        p = UB.ensure(cfg)
+        if p:
+            return [p]
+    p = helper_path(cfg)
+    if p:
+        return [p]
     if os.environ.get("FOREST_UI_DEV") == "1":
         s = dev_script()
         if s:
@@ -157,7 +197,13 @@ def mode(cfg: dict) -> str:
 
 
 def enabled(cfg: dict) -> bool:
-    """Нужно ли держать помощник: настройка + наличие файла."""
+    """Нужно ли держать помощник: настройка + возможность его запустить.
+
+    В сборке «один файл» встроенный помощник распаковывается внутри
+    ``command()``; если распаковка не удалась, ``command()`` пуст — и тогда
+    ``enabled()`` честно говорит «нет», чтобы трей сразу нарисовал встроенный
+    значок, а не ждал 20 с помощника, которого не будет.
+    """
     m = mode(cfg)
     if m == "off":
         return False
@@ -444,6 +490,13 @@ def status_text(cfg: dict) -> str:
         return I.t("ui.status.off")
     p = helper_path(cfg)
     if not p:
+        # Сборка «один файл»: помощник встроен, но ещё не распакован — это не
+        # «не установлен», и человек должен видеть разницу.
+        try:
+            if UB.available():
+                return I.t("ui.status.embedded", path=UB.target_path(cfg))
+        except Exception:
+            pass
         return I.t("ui.status.absent")
     pid = running_pid(cfg)
     if pid:

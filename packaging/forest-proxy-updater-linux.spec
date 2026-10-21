@@ -69,7 +69,7 @@ if _missing:
 HIDDEN = [
     "clientwrite", "clientwrite_posix", "clientwrite_v2rayn",
     "config", "i18n", "log", "netfilters", "notify", "parser", "selftest",
-    "safestdio", "sources", "theme", "tray", "tray_check", "tray_icon",
+    "desktop_env", "safestdio", "sources", "theme", "tray", "tray_check", "tray_icon",
     "tray_menu",
     "instancelock", "tray_status", "v2ray_updater", "watch", "watchdog",
     "xraytest",

@@ -2,7 +2,8 @@
 
 Всё, что нужно, чтобы из исходников получить **один файл**: скачал — запустил.
 Python пользователю не нужен, ставить нечего: внутрь вшиты и код, и ядро Xray,
-и гео-базы.
+и гео-базы, и **помощник интерфейса** (`forest-ui.exe`: значок в трее, меню,
+уведомления).
 
 ## Требования (только для СБОРКИ)
 
@@ -36,21 +37,31 @@ $env:FOREST_PYTHON='C:\Path\to\python.exe'; powershell -File packaging\build.ps1
    (пин — `requirements-build.txt`), если его там нет;
 3. если нет ядра — качает официальный релиз XTLS/Xray-core (`fetch_core.py`);
    если нет иконки — рисует `app.ico` (`make_icon.py`);
-4. запускает PyInstaller по спеке `ForestProxyUpdater.spec`;
-5. кладёт результат в `dist\` и печатает размер и SHA256, дублируя их в
-   `dist\build-report.json` и `dist\ForestProxyUpdater.exe.sha256`.
+4. **проверяет собранного помощника** `dist\forest-ui.exe` (без него сборка
+   останавливается — иначе получился бы .exe без значка, меню и уведомлений);
+   предупреждает, если `src/forest_ui.py`/`ui_menu.py` новее собранного файла;
+5. запускает PyInstaller по спеке `ForestProxyUpdater.spec` (помощник едет внутрь
+   как данные `ui_bundle/`, вместе с манифестом SHA-256);
+6. кладёт результат в `dist\` и печатает размер и SHA256, дублируя их в
+   `dist\build-report.json` (там же `helper_sha256`) и
+   `dist\ForestProxyUpdater.exe.sha256`.
 
-Готовый файл: **`packaging\dist\ForestProxyUpdater.exe`**.
+Готовый файл: **`packaging\dist\ForestProxyUpdater.exe`** (~65 МиБ, из них
+~36 МиБ — встроенный помощник).
 
-### Помощник интерфейса (`forest-ui.exe`) — отдельный файл
+### Помощник интерфейса (`forest-ui.exe`): встроен в один .exe
 
 Интерфейс (значок в трее, меню с подменю, уведомления с анимацией, темы) собран
-в **отдельную** программу на Qt, чтобы основная оставалась маленькой и без
-сторонних зависимостей. Сборка:
+**отдельной** программой на Qt — так он не тянет Qt в основную программу — и при
+сборке **встраивается внутрь** `ForestProxyUpdater.exe` как данные
+(`ui_bundle/forest-ui.exe`). Пользователь Windows скачивает один файл; на Linux
+и для ручной установки тот же файл остаётся самостоятельным артефактом.
+
+Порядок сборки (сначала помощник, потом основная программа):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File packaging\build-ui.ps1
-:: -> packaging\dist\forest-ui.exe (~35 МиБ) + forest-ui.exe.sha256
+powershell -ExecutionPolicy Bypass -File packaging\build-ui.ps1   :: -> dist\forest-ui.exe (~35 МиБ)
+powershell -ExecutionPolicy Bypass -File packaging\build.ps1      :: -> dist\ForestProxyUpdater.exe (~65 МиБ)
 ```
 
 Скрипт ставит `PySide6-Essentials` (пин — `requirements-ui.txt`) в то же
@@ -67,8 +78,20 @@ packaging\dist\forest-ui.exe --selftest     :: значки, темы, мост 
 packaging\dist\forest-ui.exe --show error "Заголовок" "Текст"
 ```
 
-Основная сборка **не** требует Qt: если помощник не собран, программа работает
-со встроенным значком и встроенными уведомлениями.
+Основная сборка **требует** готового `forest-ui.exe` и падает с понятным
+сообщением, если его нет: «один файл» без значка и меню — это молча урезанная
+программа. Указать готовый файл вручную можно так:
+`build.ps1 -Helper D:\путь\forest-ui.exe` (та же переменная окружения —
+`FOREST_HELPER_EXE`).
+
+Как помощник попадает к пользователю: при `--run`/`--ensure`/`--install`
+программа сверяет `<root>\forest-ui.exe` с SHA-256 из встроенного манифеста
+(`src/ui_bundle.py`). Хеш совпал — файл не трогается (повторный запуск ничего не
+распаковывает). Отличается или отсутствует — копируется во временный
+`.new-<pid>`, сверяется хеш КОПИИ, затем `os.replace` и сверка того, что уже
+лежит на диске; только после этого помощник запускается. Не вышло (нет прав,
+файл занят работающим помощником) — одна строка в журнале и работа со встроенным
+значком, без окон и падений.
 
 ## Что внутри одного .exe
 
@@ -82,6 +105,8 @@ packaging\dist\forest-ui.exe --show error "Заголовок" "Текст"
 | гео-базы | `bin\xray\geoip.dat`, `bin\xray\geosite.dat` | `clientwrite.geo_asset_dir()` (каталог рядом с ядром) |
 | лицензия ядра (MPL-2.0) | `bin\xray\LICENSE` | — |
 | `config.example.json` | корень пакета | `config.example_config_path()` (первый запуск без конфига) |
+| помощник интерфейса | `ui_bundle\forest-ui.exe` | `ui_bundle.embedded_path()` → распаковка в `<root>\forest-ui.exe` |
+| манифест помощника (SHA-256, размер, версия) | `ui_bundle\ui-bundle.json` | `ui_bundle.embedded_sha256()` |
 
 Пути подобраны под уже существующий код: при распаковке onefile `__file__`
 равен файлу внутри `sys._MEIPASS`, поэтому `config.BASE_DIR` == каталог
@@ -102,6 +127,18 @@ ForestProxyUpdater.exe --status   --config config.example.json
 копируется из пакета в постоянный каталог
 (`%LOCALAPPDATA%\ForestProxyUpdater\bin\xray\xray.exe`), размер пула, состояние
 системного прокси и строку про надзор.
+
+Проверка встроенного помощника — в отдельной песочнице, не трогая рабочую
+установку:
+
+```powershell
+Get-Content packaging\dist\ui-bundle.json        # что вшито: sha256, size, версия
+$env:FOREST_ROOT = 'D:\fpu-sandbox'              # свой корень, свой конфиг
+packaging\dist\ForestProxyUpdater.exe --ensure
+Get-Content D:\fpu-sandbox\logs\main.log | Select-String 'SHA-256|распакован'
+Get-FileHash D:\fpu-sandbox\forest-ui.exe -Algorithm SHA256   # == sha256 из манифеста
+Remove-Item D:\fpu-sandbox\forest-ui.exe                      # повторный запуск вернёт файл
+```
 
 ### Отладочная сборка без окна ошибок (для проверок)
 

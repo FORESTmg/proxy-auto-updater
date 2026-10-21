@@ -86,27 +86,50 @@ If the core is not found, the program tells you and points you to the official
 Xray-core release page. **The program does not download the core for you** — you
 put `xray.exe` in place yourself.
 
+## What changed in 1.3.2
+
+* **Windows: one file instead of two.** Previously a second file — the interface
+  helper `forest-ui.exe` (36 MB) — had to sit next to the program. It is now
+  **inside** `ForestProxyUpdater.exe`: you download and run **one** file, and the
+  tray icon, menu and notifications are there from the first run.
+* **The helper unpacks itself** into the permanent folder
+  `%LOCALAPPDATA%\ForestProxyUpdater\forest-ui.exe`, verified by **SHA-256**
+  against the embedded copy. That makes the first run **1–3 s** longer; later
+  runs are not affected (a matching copy is left untouched, the check takes
+  ~0.05 s). A deleted or corrupted helper file is restored on the next run.
+* **If unpacking fails** (no permission, file in use) the program keeps working
+  with its **built-in simplified tray icon**: no crash, no modal windows, just a
+  log line. The helper is picked up as soon as the target is writable again.
+* The installer file grew to **≈65 MB** (30 MB + 36 MB as two files before) —
+  still less than the two files used to add up to.
+* On **Linux** and for manual installs the helper is still shipped as a
+  **separate artifact** (`forest-ui`); that did not change.
+
 ## Quick start
 
-The distributable is a single `.exe`. The usual flow:
+**Windows: you download ONE file** — `ForestProxyUpdater.exe`. Everything is
+already inside: the Xray core with both geo databases, the icon and the interface
+helper (tray icon, menu, notifications). Nothing has to be put next to it.
 
-1. **Download** the `.exe` from the project's GitHub Releases page.
-   2. **Nothing to download — the core is already inside.** The `.exe` ships with
-      Xray v26.3.27 and both geo databases (`geoip.dat`, `geosite.dat`) embedded, so
-      standalone mode works on a clean machine with no extra files. Put your own
-      `bin\xray\` folder beside the `.exe` only if you want to override or update
-      the core — that copy takes priority over the built-in one.
-      v2rayN mode needs no files at all: v2rayN provides its own core.
+1. **Download** `ForestProxyUpdater.exe` from the project's GitHub Releases page —
+   for Windows it is the only file you need.
+2. **The core and geo databases are already inside.** The `.exe` ships with
+   Xray v26.3.27 and both geo databases (`geoip.dat`, `geosite.dat`) embedded, so
+   standalone mode works on a clean machine with no extra files. Put your own
+   `bin\xray\` folder beside the `.exe` only if you want to override or update
+   the core — that copy takes priority over the built-in one. v2rayN mode needs
+   no files at all: v2rayN provides its own core.
 3. **Run the `.exe`.** Windows will warn about an unsigned program
    (SmartScreen) — see the security section. On first run the program creates
    its working config from `config.example.json`, lays itself out under
-   `%LOCALAPPDATA%\ForestProxyUpdater`, adds a Start Menu shortcut and a
-   **Windows Task Scheduler watchdog task** (autonomous supervision — see
-   below), and runs the first selection cycle.
+   `%LOCALAPPDATA%\ForestProxyUpdater`, **unpacks the embedded interface helper
+   there too** (≈36 MB, 1–3 s, SHA-256 checked against the embedded copy), adds a
+   Start Menu shortcut and a **Windows Task Scheduler watchdog task** (autonomous
+   supervision — see below), and runs the first selection cycle.
 4. After the first cycle, **the Windows system proxy is pointed at the local
    port** `127.0.0.1:10808` and traffic goes through the selected servers.
 
-State, logs and the working config live under
+State, logs, the working config and the helper file live under
 `%LOCALAPPDATA%\ForestProxyUpdater`. The folder you unzipped the program into
 stays clean.
 
@@ -208,9 +231,12 @@ fixed `10`, now it is the real pool size.
 
 ## Interface: the Qt helper (tray icon, menu, notifications)
 
-The interface is a **separate program, `forest-ui`** (Qt/PySide6, LGPL-3.0 —
-compatible with this project's GPL-3.0; Qt is linked dynamically and unmodified).
-The main program stays small and needs no third-party packages; the helper draws:
+The interface is a **program, `forest-ui`** (Qt/PySide6, LGPL-3.0 — compatible
+with this project's GPL-3.0; Qt is linked dynamically and unmodified). On Windows
+it **lives inside the same `ForestProxyUpdater.exe`** and is unpacked at start-up
+(see “What changed in 1.3.2”), so there is no separate file to download; on Linux
+and for manual installs it is still shipped as its own artifact. The main program
+needs no third-party packages, while the helper draws:
 
 * the **tray icon** — your own `app.ico` with **not a single altered pixel**
   (proved pixel by pixel in the self-test: 77.8 % of the 32×32 points match the
@@ -261,6 +287,7 @@ Everything degrades quietly:
 | Situation | What happens |
 |---|---|
 | helper not installed, not running or crashed | the built-in icon (ctypes) and the built-in notifications work — the program behaves exactly as before |
+| the embedded helper could not be unpacked (no permission, file in use) | the same thing: built-in icon, one log line, no windows and no crash; the attempt is repeated on the next start |
 | helper running | the helper owns the icon, the menu and the notifications; the built-in tray waits **in reserve** and takes over within seconds if the helper stops |
 | no tray on the desktop at all | notifications still appear; the program keeps working (only the menu is missing) |
 | `"ui": {"helper": "off"}` | the helper is never started |
@@ -270,27 +297,49 @@ task** (its action is `--ensure`) and by the supervisor's keep-alive loop every
 30 s — so a helper that crashes comes back on its own, and a second copy is never
 started.
 
-Settings: `ui.helper` = `auto` (default; start it if the file is present) |
-`on` | `off`, and `ui.helper_exe` — an explicit path to the file.
-Build it with `packaging\build-ui.ps1` (Windows) or
-`sh packaging/build-ui.sh` (Linux); it ships as a separate artefact
-(`forest-ui.exe` / `forest-ui`, ~80 MB — Qt is big, that is expected).
+Settings: `ui.helper` = `auto` (default; start it if the helper is present) |
+`on` | `off`, and `ui.helper_exe` — an explicit path to the file (it wins over the
+embedded one). The helper is built as a **separate artifact** with
+`packaging\build-ui.ps1` (Windows) or `sh packaging/build-ui.sh` (Linux) —
+`forest-ui.exe` / `forest-ui`, about 36 MB (Qt is big, that is expected). The
+Windows build `packaging\build.ps1` then **embeds that file inside**
+`ForestProxyUpdater.exe` (bundle data `ui_bundle/`, see `src/ui_bundle.py`), so a
+Windows user gets a single file. Linux and manual installs use the same artifact
+directly.
 
 On **Linux** the same helper gives a real tray icon and menu (Qt talks to
 StatusNotifier/**D-Bus**) and **draws the SAME notification card as on Windows**:
 it is visible even without a notification service.
 
-**Honest note about the menu on Linux.** The tray menu is our own window
-(`src/ui_menu.py`, Qt.Popup, the card's style, animation), so it applies where
-**we draw the menu**. When the tray goes through the system protocol
-(StatusNotifier/AppIndicator, which `QSystemTrayIcon` sits on), the context menu
-is drawn by the **desktop panel** (KDE Plasma, GNOME, XFCE): its fonts, paddings,
-corner radii and animation — our style cannot apply there, exactly as with the
-notification card, where Linux keeps the system notification. Our menu look
-(colors, radii, row highlight, the 3 px lift, submenu slide-out) works on Windows
-and wherever we draw the menu ourselves. Our own (non-system-protocol) path is
-the same code on Linux (`src/ui_style.py` + `src/ui_menu.py`), but it could not be
-checked on a live Linux desktop in this build (see "Verification limits").
+**Honest note about tray clicks on Linux.** There are two tray backends on Linux,
+and they behave differently:
+
+* **XEmbed panels** (XFCE, MATE, Cinnamon, LXQt — no StatusNotifier): the right
+  click is delivered to the application, so the helper opens **our own animated
+  menu** window at the icon, exactly as on Windows. The helper no longer hands
+  any `QMenu` to the tray (`QSystemTrayIcon.setContextMenu` is gone) — while it
+  did, Qt popped up its own stock menu instead of ours;
+* **StatusNotifier panels** (KDE Plasma, GNOME with the AppIndicator extension):
+  the **panel owns the right click** — it asks the application for a menu
+  description (`com.canonical.dbusmenu`) and draws it in its own style, and our
+  window stays invisible to it. On KDE Plasma we therefore ship a **panel widget
+  (plasmoid)** — `plasma/plasmoid/org.forest.proxyupdater`, installed into
+  `/usr/share/plasma/plasmoids/` by the same package: it draws our icon with the
+  state colour and runs `forest-ui --menu-popup` on click, i.e. **our** menu, not
+  the panel's.
+
+| Click | Windows | Linux XEmbed (XFCE/MATE/Cinnamon/LXQt) | KDE Plasma (our plasmoid) |
+|---|---|---|---|
+| right | our animated menu | our animated menu | our animated menu |
+| left | nothing | nothing | nothing |
+| Ctrl+left | — | — | our menu (fallback, see below) |
+
+Add the plasmoid: right-click the panel → **Add Widgets…** → *FOREST Proxy
+Updater* → drag it onto the panel. If your panel intercepts the right click with
+its own widget menu, use **Ctrl+left click** — Plasma sometimes keeps the right
+click for the widget's own context menu; that is a panel behaviour, not a defect
+of the menu. Details: `plasma/plasmoid/org.forest.proxyupdater/README.md`.
+Details: `docs/LINUX-ARCHITECTURE.ru.md`, section 5.
 
 If there is no graphical
 session or the card cannot be shown (window failure), the fallback kicks in — a
@@ -563,6 +612,7 @@ Everything the program writes lives under `%LOCALAPPDATA%\ForestProxyUpdater`
 | `state/state.json` | Internal state: hot cache, blacklist, balance signature, etc. |
 | `state/subscription_base64.txt` | Current pool as a base64 subscription (for manual import into any client). |
 | `state/proxy_orig.json` | The system-proxy state saved before the first change. |
+| `forest-ui.exe` | The unpacked embedded interface helper (checked by SHA-256 against the embedded copy; no need to delete it — it is restored on the next run). |
 
 Where to find problems is described in [`docs/FAQ.md`](docs/FAQ.md).
 
