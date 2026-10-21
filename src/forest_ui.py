@@ -1969,7 +1969,7 @@ class Ui(QtCore.QObject):
         except Exception:
             pass
         self.show_toast(self.kind, SI.tip(self.cfg, st, limit=0), body,
-                        duration_ms=9000)
+                        duration_ms=9000, manual=True)
 
     def show_process_card(self, proc: dict) -> None:
         """Карточка процесса — состав и тексты как в эталоне и макете.
@@ -2042,7 +2042,7 @@ class Ui(QtCore.QObject):
                                steps=d["steps"], footer=d["footer"],
                                total_ms=d["total_ms"],
                                duration_ms=HOLD_FINAL_MS + 1200,
-                               spinner=True, role=d["role"])
+                               spinner=True, role=d["role"], manual=True)
 
     def open_log(self) -> None:
         try:
@@ -2060,6 +2060,35 @@ class Ui(QtCore.QObject):
             self.show_toast("error", tr("tray.msg.no_log"), str(e))
 
     # ── уведомления ──
+    def notifications_on(self) -> bool:
+        """Включены ли УВЕДОМЛЕНИЯ настройкой ``notify.enabled`` (по умолчанию — да).
+
+        ВАЖНО: это НЕ то же самое, что :meth:`card_enabled` (та отвечает «можно ли
+        рисовать СВОЮ карточку на этой платформе»). Выключенные уведомления
+        глушат ВСЕ карточки — события, процессы и служебные сбои; исключение
+        только явный ручной показ (``--show``, «Проверить уведомление»,
+        «Сведения»). Раньше проверка стояла лишь в :meth:`_on_transition`, и
+        карточка провала процесса/ошибки команды выезжала при выключенных
+        уведомлениях.
+        """
+        try:
+            import notify as N
+            return bool(N.settings(self.cfg).get("enabled", True))
+        except Exception:
+            pass
+        try:
+            return bool((self.cfg.get("notify") or {}).get("enabled", True))
+        except Exception:
+            return True
+
+    def _notify_off_reason(self) -> str:
+        """Почему карточку не показываем ('' — показываем)."""
+        if self.quiet:
+            return "тихий режим (quiet)"
+        if not self.notifications_on():
+            return "уведомления выключены (notify.enabled=false)"
+        return ""
+
     def card_enabled(self) -> bool:
         """Рисуем ли СВОЮ карточку (Windows — всегда, Linux — при графике).
 
@@ -2101,7 +2130,8 @@ class Ui(QtCore.QObject):
     def show_toast(self, kind: str, title: str, body: str, sub: str = "",
                    pct=None, steps=None, footer: str = "",
                    duration_ms: int = None, spinner: bool = False,
-                   total_ms=None, role: str = "restore") -> dict:
+                   total_ms=None, role: str = "restore",
+                   manual: bool = False) -> dict:
         """Показывает уведомление. -> словарь со статистикой кадров.
 
         Windows И Linux (при графической сессии) — ОДНА И ТА ЖЕ карточка:
@@ -2110,7 +2140,30 @@ class Ui(QtCore.QObject):
         ``docs/notify-mockup.html``). Если карточку показать нельзя (нет
         графической сессии, настройка выключена, сбой окна) — откат на
         системное уведомление D-Bus, где этапы и время идут В ТЕЛЕ.
+
+        ``manual=True`` — показ ПО ДЕЙСТВИЮ ПОЛЬЗОВАТЕЛЯ («Проверить
+        уведомление», «Сведения»): он проходит и при выключенных уведомлениях,
+        потому что пользователь попросил карточку сам. Всё остальное (события,
+        карточки процессов, ошибки команд) при ``notify.enabled=false`` НЕ
+        показывается — иначе выключенная настройка выглядела сломанной.
         """
+        # ЕДИНСТВЕННАЯ ТОЧКА ГЕЙТА: все карточки идут через этот метод.
+        # Тихий режим (проверки) глушит ВСЁ, ручной показ проходит только
+        # выключенные уведомления — он и есть действие пользователя.
+        off = ("тихий режим (quiet)" if self.quiet else
+               ("" if (manual or self.notifications_on()) else
+                "уведомления выключены (notify.enabled=false)"))
+        if off:
+            try:
+                log.get_logger().info(
+                    f"forest-ui: карточка «{kind}» не показана — {off}")
+            except Exception:
+                pass
+            self.toast = None
+            self.toast_finished = True
+            self.last_stats = {"painted": False, "suppressed": off,
+                               "kind": kind, "manual": False, "frames": 0}
+            return self.last_stats
         s = {}
         try:
             import notify as N
@@ -4569,6 +4622,90 @@ def selftest(cfg: dict) -> int:
         ui2._card_gate("демо") is False)
     chk("есть явный демо-флаг --show-all и функция показа серии",
         callable(globals().get("show_all_demo")))
+
+    # ── notify.enabled=false глушит ВСЕ карточки (кроме ручного показа) ──
+    # В песочнице без серверов помощник показывал карточку провала при
+    # выключенных уведомлениях: проверка стояла только в _on_transition, а
+    # карточка процесса/ошибки шла мимо неё.
+    _say()
+    _say("=" * 64)
+    _say("1д. notify.enabled=false: ни одной карточки, кроме ручного показа")
+    _say("=" * 64)
+
+    def _cfg_notify(enabled: bool) -> dict:
+        c = dict(cfg)
+        c["notify"] = dict(cfg.get("notify") or {})
+        c["notify"]["enabled"] = bool(enabled)
+        return c
+
+    def _toast_shown(u) -> bool:
+        return getattr(u, "toast", None) is not None
+
+    def _drop_toast(u) -> None:
+        t = getattr(u, "toast", None)
+        try:
+            if t is not None:
+                t._ticker.stop()
+                t.hide()
+        except Exception:
+            pass
+        u.toast = None
+
+    ui_nf = None
+    try:
+        ui_nf = Ui(_cfg_notify(False))
+        # Ui() при сборке перечитывает config.json (refresh) — возвращаем наш
+        # тестовый конфиг: проверяем ГЕЙТ, а не содержимое файла на машине.
+        ui_nf.cfg = _cfg_notify(False)
+        st_ev = ui_nf.show_toast("error", "Провал", "",
+                                 steps=[("шаг", 100)], total_ms=100)
+        chk("notify.enabled=false: карточка события/провала НЕ показана",
+            not _toast_shown(ui_nf)
+            and str(st_ev.get("suppressed", "")).startswith("уведомления выключены"),
+            f"toast={ui_nf.toast!r}, stats={st_ev}")
+        ui_nf._on_transition("ok", "error")
+        chk("notify.enabled=false: переход ok->error карточку НЕ показывает",
+            not _toast_shown(ui_nf))
+        ui_nf.show_process_card({"id": "probe-1", "kind": "restore",
+                                 "failed": True,
+                                 "steps": [{"nm": "шаг", "t": 100}]})
+        chk("notify.enabled=false: карточка процесса (провал) НЕ показана",
+            not _toast_shown(ui_nf))
+        ui_nf.show_info()
+        chk("notify.enabled=false: «Сведения» (ручное действие) показываются",
+            _toast_shown(ui_nf))
+        _drop_toast(ui_nf)
+        ui_nf.show_demo_card()
+        chk("notify.enabled=false: «Проверить уведомление» (ручное) работает",
+            _toast_shown(ui_nf))
+    except Exception as _e:                        # noqa: BLE001
+        chk("notify.enabled=false: гейт карточек работает", False, repr(_e))
+    finally:
+        if ui_nf is not None:
+            _drop_toast(ui_nf)
+            try:
+                ui_nf.tray.hide()
+            except Exception:
+                pass
+
+    ui_nn = None
+    try:
+        ui_nn = Ui(_cfg_notify(True))
+        st_on = ui_nn.show_toast("error", "Провал", "",
+                                 steps=[("шаг", 100)], total_ms=100)
+        chk("notify.enabled=true: карточка показывается (гейт не мешает)",
+            _toast_shown(ui_nn) and not st_on.get("suppressed"),
+            f"toast={ui_nn.toast!r}, stats={st_on}")
+    except Exception as _e:                        # noqa: BLE001
+        chk("notify.enabled=true: карточка показывается", False, repr(_e))
+    finally:
+        if ui_nn is not None:
+            _drop_toast(ui_nn)
+            try:
+                ui_nn.tray.hide()
+            except Exception:
+                pass
+
     # пустые данные не печатают нулей ни в карточке, ни в status_info
     chk("нет замера -> нет числа: final_texts(0) без «0.00 с»",
         "0.00" not in final_texts(0)[0] and "0.00" not in final_texts(0)[1],

@@ -76,6 +76,15 @@ Windows ships as **one** file (see the last sections of this release).
   (a process with no second tray icon) that shows **our** menu. On Plasma the
   widget may still get the right click taken by the panel's own widget menu;
   `Ctrl+left click` opens our menu as the documented fallback.
+- **`notify.enabled = false` did not silence the notification cards.** The setting
+  was checked in one place only (`_on_transition`), so the card for a failed
+  restore process, for a command error or for a missing log still popped up —
+  in a sandbox without any servers the helper showed the 392x172 "failure" card
+  with notifications switched off. All cards now pass one gate in
+  `Ui.show_toast()`: with `notify.enabled=false` nothing appears (events,
+  process/failure cards, service errors), and only an explicit user action —
+  `--show`/`--show-all`, the "Проверить уведомление" and "Сведения" menu items —
+  still draws a card. The quiet mode of the checks silences everything.
 - **A missing Qt (e.g. no `libglvnd`) crashed the helper with a PyInstaller
   traceback instead of the clear "Qt unavailable" exit.** `import ui_style as US`
   sat inside `if QT_OK:`, while the module-level `NT_* = US.*` block below ran
@@ -97,17 +106,37 @@ Windows ships as **one** file (see the last sections of this release).
   `systemd-cat`: 59 journal lines, **0** `?????`, 57 lines with Cyrillic, no
   repeating warnings.
 - Windows: `v2ray_updater.py --selftest` — PASSED; `forest_ui.py --selftest` —
-  144 checks, 0 failures (right-click still opens the custom menu there, no
-  `QMenu` is set on Windows).
+  304 checks green, 1 known artifact (menu width 453 px instead of the 269 px of
+  the mock-up — the stand's font metrics, the same artifact as before; the
+  right-click/left-click checks and the `notify.enabled` gate are green).
 - Qt branch of the tray menu (Linux code path) — on Qt 6.9 with
-  `os.name="posix"`: the `QMenu` carries 12 items, both submenus, and a click on
-  "Обновить серверы сейчас"/"РФ напрямую" reaches the application
-  (`packaging/check_linux_tray.py`).
+  `os.name="posix"`: no `QMenu` is handed to the tray, right click (`Context`)
+  opens our menu, left click opens nothing, and both the toggle and the command
+  items reach the application (`packaging/check_linux_tray.py` — 11 checks).
+- **Live XEmbed panel** (Xvfb + `stalonetray` + `xdotool`, WSL Ubuntu, the built
+  `linux/dist/forest-ui`): the icon is embedded (24x24), a **left** click leaves
+  0 menu windows, a **right** click opens our window (380x515 at the icon,
+  `Map State=IsViewable`), a second right click does not duplicate it, `Esc` and
+  a click outside both return it to `IsUnMapped`, and the helper stays alive.
+- `notify.enabled` gate on real config files
+  (`packaging/check_notify_gate.py`, 9 checks): with `enabled=false` the failure
+  card from `tray_status.json`, the `ok→error` event, a service error and a
+  direct process card are all suppressed; the manual "Проверить уведомление"
+  still works; with `enabled=true` the same failure card is shown.
+- Arch package in the `archlinux` container: contents equal to the built ELFs
+  (`forest-ui` sha256 `3fd5f5cc…`, main `5a47d9fa…`), plasmoid files equal to the
+  repo sources, `pacman -U` → run → `pacman -R` leaves no traces.
+- Plasmoid: `qmllint` against the real Plasma 6 QML modules — 0 warnings;
+  `qmlformat` parses the file; `kpackagetool6 --type Plasma/Applet --install`
+  accepts the package (both from the repo and after installation).
 
 ### Not verified
 
-- The real DBusMenu round-trip to a KDE panel (needs a live Plasma session) —
-  the user checks it on the VM after rebuilding.
+- The real DBusMenu round-trip to a KDE panel and the plasmoid on a live Plasma
+  session (no Plasma on the stand): right-click behaviour in the user's theme and
+  the panel icon must be checked on the VM.
+- `.rpm` was not rebuilt in this pass (`rpmbuild` absent on the stand); the
+  `.deb`, Arch package and `.tar.gz` are at 1.3.2.
 
 ### Packaging (Windows): one file instead of two
 

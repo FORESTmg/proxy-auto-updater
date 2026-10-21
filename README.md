@@ -104,6 +104,19 @@ put `xray.exe` in place yourself.
   still less than the two files used to add up to.
 * On **Linux** and for manual installs the helper is still shipped as a
   **separate artifact** (`forest-ui`); that did not change.
+* **Right-click on Linux now opens OUR menu, not the panel's one.** In XEmbed
+  panels (XFCE, MATE, Cinnamon, LXQt) the right click reaches the program, so our
+  animated window appears at the icon — as on Windows; the left click still opens
+  nothing. The stock `QMenu` is no longer handed to the tray (that was why the
+  panel showed Qt's own menu).
+* **KDE Plasma gets a panel widget (plasmoid)** for the case where the panel owns
+  the right click: it draws our icon with the state colour and opens **our** menu
+  (`forest-ui --menu-popup`). Add it via *Add Widgets…* → *FOREST Proxy Updater*;
+  `Ctrl+left click` opens the menu if your theme keeps the right click for the
+  widget's own menu.
+* **`notify.enabled = false` now really silences everything**: no cards for
+  outages, failed restores or service errors — only an explicit user action
+  (`--show`, "Проверить уведомление", "Сведения") still shows a card.
 
 ## Quick start
 
