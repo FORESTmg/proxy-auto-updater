@@ -86,7 +86,25 @@ If the core is not found, the program tells you and points you to the official
 Xray-core release page. **The program does not download the core for you** — you
 put `xray.exe` in place yourself.
 
-## What changed in 1.3.2
+## What changed in 1.3.10
+
+This is the first published tag after 1.3.1, so it carries everything 1.3.2–1.3.9
+closed as well:
+
+* **The documented one-line install works again.** Every script shipped inside a
+  package (`.deb` `postinst`, `install.sh`, `build-*.sh`, `.desktop` files) had
+  been stored with Windows line endings, so `curl … | bash` died with
+  `$'\r': command not found`. The whole tree is LF now and `.gitattributes`
+  pins it; `packaging-linux/check-eol.sh` fails a build that would ship CR.
+* **Tray, menu and tooltip on XFCE, MATE and LXQt**: measured on a real panel
+  (`docs/de-matrix/`), including the dark theme and 150 % scaling — the card no
+  longer comes out white on a dark desktop, and the menu lands next to the icon
+  instead of the corner of the screen.
+* **The fallback icon no longer disappears two seconds after it appears** in
+  sessions without a notification area (GNOME without AppIndicator, LXQt
+  without a tray plugin, a bare window manager).
+* **Exactly one icon and one helper process** after an upgrade; the card keeps
+  its margins on HiDPI panels and hides while a fullscreen app is active.
 
 * **Windows: one file instead of two.** Previously a second file — the interface
   helper `forest-ui.exe` (36 MB) — had to sit next to the program. It is now
@@ -259,7 +277,7 @@ fixed `10`, now it is the real pool size.
 The interface is a **program, `forest-ui`** (Qt/PySide6, LGPL-3.0 — compatible
 with this project's GPL-3.0; Qt is linked dynamically and unmodified). On Windows
 it **lives inside the same `ForestProxyUpdater.exe`** and is unpacked at start-up
-(see “What changed in 1.3.2”), so there is no separate file to download; on Linux
+(see “What changed in 1.3.10”), so there is no separate file to download; on Linux
 and for manual installs it is still shipped as its own artifact. The main program
 needs no third-party packages, while the helper draws:
 

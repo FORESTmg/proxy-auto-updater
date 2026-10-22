@@ -94,11 +94,11 @@ way as long as the session has X11/XWayland.
 
 | Формат | Дистрибутивы | Установка одной командой | Права |
 | --- | --- | --- | --- |
-| `.deb` | Debian, Ubuntu, Mint | `sudo apt install ./forest-proxy-updater_1.3.2_amd64.deb` | root |
-| `.rpm` | Fedora, RHEL, Rocky, Alma, openSUSE | `sudo dnf install ./forest-proxy-updater-1.3.2-1.x86_64.rpm` | root |
-| `.pkg.tar.zst` | Arch, Manjaro, EndeavourOS | `sudo pacman -U ./forest-proxy-updater-1.3.2-1-x86_64.pkg.tar.zst` | root |
-| `.AppImage` | любой (glibc, x86_64) | `chmod +x ForestProxyUpdater-1.3.2-x86_64.AppImage && ./ForestProxyUpdater-1.3.2-x86_64.AppImage --install` | **без root** |
-| `.tar.gz` | любой | `tar xzf forest-proxy-updater-1.3.2-linux-x86_64.tar.gz && cd forest-proxy-updater-1.3.2-linux-x86_64 && sudo ./install.sh` | root |
+| `.deb` | Debian, Ubuntu, Mint | `sudo apt install ./forest-proxy-updater_1.3.10_amd64.deb` | root |
+| `.rpm` | Fedora, RHEL, Rocky, Alma, openSUSE | `sudo dnf install ./forest-proxy-updater-1.3.10-1.x86_64.rpm` | root |
+| `.pkg.tar.zst` | Arch, Manjaro, EndeavourOS | `sudo pacman -U ./forest-proxy-updater-1.3.10-1-x86_64.pkg.tar.zst` | root |
+| `.AppImage` | любой (glibc, x86_64) | `chmod +x ForestProxyUpdater-1.3.10-x86_64.AppImage && ./ForestProxyUpdater-1.3.10-x86_64.AppImage --install` | **без root** |
+| `.tar.gz` | любой | `tar xzf forest-proxy-updater-1.3.10-linux-x86_64.tar.gz && cd forest-proxy-updater-1.3.10-linux-x86_64 && sudo ./install.sh` | root |
 
 Во всех случаях ядро `xray` и гео-базы (`geoip.dat`, `geosite.dat`) **уже внутри
 бинарника** — докладывать ничего не нужно. Python не требуется: программа несёт
@@ -134,14 +134,14 @@ curl --version | head -1
 ### 2.1. .deb — Debian, Ubuntu, Linux Mint
 
 ```sh
-sudo apt install ./forest-proxy-updater_1.3.2_amd64.deb
+sudo apt install ./forest-proxy-updater_1.3.10_amd64.deb
 ```
 
 `apt` сам подтянет зависимость `curl` из своих репозиториев. Если вы предпочитаете
 чистый `dpkg`:
 
 ```sh
-sudo dpkg -i forest-proxy-updater_1.3.2_amd64.deb
+sudo dpkg -i forest-proxy-updater_1.3.10_amd64.deb
 sudo apt-get -f install        # дотянет curl, если его не было
 ```
 
@@ -150,20 +150,20 @@ sudo apt-get -f install        # дотянет curl, если его не бы�
 Fedora / RHEL / Rocky / Alma:
 
 ```sh
-sudo dnf install ./forest-proxy-updater-1.3.2-1.x86_64.rpm
+sudo dnf install ./forest-proxy-updater-1.3.10-1.x86_64.rpm
 ```
 
 openSUSE (пакет не подписан, поэтому нужен явный флаг разрешения):
 
 ```sh
-sudo zypper --no-gpg-checks install ./forest-proxy-updater-1.3.2-1.x86_64.rpm
+sudo zypper --no-gpg-checks install ./forest-proxy-updater-1.3.10-1.x86_64.rpm
 ```
 
 Если репозитории недоступны (например, машина за локальным прокси), а `curl` уже
 установлен, пакет ставится и без сети:
 
 ```sh
-sudo rpm -ivh --nodeps forest-proxy-updater-1.3.2-1.x86_64.rpm
+sudo rpm -ivh --nodeps forest-proxy-updater-1.3.10-1.x86_64.rpm
 ```
 
 ### 2.3. Arch, Manjaro — .pkg.tar.zst и PKGBUILD
@@ -171,7 +171,7 @@ sudo rpm -ivh --nodeps forest-proxy-updater-1.3.2-1.x86_64.rpm
 Готовый пакет:
 
 ```sh
-sudo pacman -U forest-proxy-updater-1.3.2-1-x86_64.pkg.tar.zst
+sudo pacman -U forest-proxy-updater-1.3.10-1-x86_64.pkg.tar.zst
 ```
 
 Сборка из `PKGBUILD` (лежит в `packaging-linux/arch/PKGBUILD`) — тот же набор
@@ -192,8 +192,8 @@ AppImage — один файл, ничего не требует от систе
 Установка «для себя» (юниты `systemd --user` + автозапуск без входа в систему):
 
 ```sh
-chmod +x ForestProxyUpdater-1.3.2-x86_64.AppImage
-./ForestProxyUpdater-1.3.2-x86_64.AppImage --install
+chmod +x ForestProxyUpdater-1.3.10-x86_64.AppImage
+./ForestProxyUpdater-1.3.10-x86_64.AppImage --install
 ```
 
 Что происходит: программа копирует себя в `~/.local/share/forest-proxy-updater/`,
@@ -205,20 +205,20 @@ chmod +x ForestProxyUpdater-1.3.2-x86_64.AppImage
 распаковку во временный каталог:
 
 ```sh
-./ForestProxyUpdater-1.3.2-x86_64.AppImage --appimage-extract-and-run --install
+./ForestProxyUpdater-1.3.10-x86_64.AppImage --appimage-extract-and-run --install
 ```
 
 Запустить **без установки** (просто из файла, без автозапуска):
 
 ```sh
-./ForestProxyUpdater-1.3.2-x86_64.AppImage --run
+./ForestProxyUpdater-1.3.10-x86_64.AppImage --run
 ```
 
 ### 2.5. Портативный .tar.gz — любой дистрибутив
 
 ```sh
-tar xzf forest-proxy-updater-1.3.2-linux-x86_64.tar.gz
-cd forest-proxy-updater-1.3.2-linux-x86_64
+tar xzf forest-proxy-updater-1.3.10-linux-x86_64.tar.gz
+cd forest-proxy-updater-1.3.10-linux-x86_64
 sudo ./install.sh
 ```
 
@@ -530,7 +530,7 @@ sh packaging-linux/build-tar.sh          # только портативный .
 
 Готовые файлы — в `packaging-linux/out/`. Требования к инструментам и устройство
 сборки: `packaging-linux/README.md`. Версия продукта в пакете задаётся переменной
-`FOREST_PKG_VERSION` (по умолчанию `1.3.2`).
+`FOREST_PKG_VERSION` (по умолчанию `1.3.10`).
 
 ---
 
