@@ -109,11 +109,23 @@ put `xray.exe` in place yourself.
   animated window appears at the icon — as on Windows; the left click still opens
   nothing. The stock `QMenu` is no longer handed to the tray (that was why the
   panel showed Qt's own menu).
-* **KDE Plasma gets a panel widget (plasmoid)** for the case where the panel owns
-  the right click: it draws our icon with the state colour and opens **our** menu
-  (`forest-ui --menu-popup`). Add it via *Add Widgets…* → *FOREST Proxy Updater*;
-  `Ctrl+left click` opens the menu if your theme keeps the right click for the
-  widget's own menu.
+* **On KDE Plasma the PANEL owns the right click, so the program draws the icon
+  itself and the panel widget (plasmoid) is gone from the package.** A plasmoid
+  cannot solve this at all: right-clicking *any* panel widget in Plasma opens the
+  panel's own menu (*Configure Widget / Edit Mode / Remove Widget*). The icon is
+  now our own tray-style window (`src/tray_popup.py`): 26 px, frameless, always
+  on top, pinned to the bottom-right corner of the work area next to the clock.
+  **Right click opens OUR menu** (`ui_menu.PopupMenu`, same style and animation),
+  the left click does nothing, hover shows a status tooltip. It hides while a
+  fullscreen application is active.
+  > The plasmoid of earlier versions was **removed from the package** — it only
+  > confused users. If the widget is still in your panel from an old install,
+  > remove it without root via `forest-clean-desktop` (it also strips the pinned
+  > duplicate launcher).
+* **There is exactly ONE icon now, and it appears by itself.** The helper's
+  launcher is hidden (`NoDisplay=true`) and the icon starts with the session
+  (`/etc/xdg/autostart/forest-proxy-updater-tray.desktop`). Nothing to launch by
+  hand — and no second icon in the menu or the panel.
 * **`notify.enabled = false` now really silences everything**: no cards for
   outages, failed restores or service errors — only an explicit user action
   (`--show`, "Проверить уведомление", "Сведения") still shows a card.
@@ -335,24 +347,31 @@ and they behave differently:
 * **StatusNotifier panels** (KDE Plasma, GNOME with the AppIndicator extension):
   the **panel owns the right click** — it asks the application for a menu
   description (`com.canonical.dbusmenu`) and draws it in its own style, and our
-  window stays invisible to it. On KDE Plasma we therefore ship a **panel widget
-  (plasmoid)** — `plasma/plasmoid/org.forest.proxyupdater`, installed into
-  `/usr/share/plasma/plasmoids/` by the same package: it draws our icon with the
-  state colour and runs `forest-ui --menu-popup` on click, i.e. **our** menu, not
-  the panel's.
+  window stays invisible to it. A panel widget cannot fix this either: in Plasma
+  a right click on *any* widget opens the panel's own menu. So on KDE the icon is
+  drawn by **the program itself** — our own tray-style window
+  (`src/tray_popup.py`): 26 px, frameless, always on top, at the bottom-right
+  corner of the work area. On Wayland it is an X11 window inside XWayland (the
+  only place where a client can set its own coordinates), and the menu and its
+  submenus live in that same X11 process — that is why they land exactly at the
+  icon. The plasmoid is **no longer shipped**.
 
-| Click | Windows | Linux XEmbed (XFCE/MATE/Cinnamon/LXQt) | KDE Plasma (our plasmoid) |
+> The icon starts with the session
+> (`/etc/xdg/autostart/forest-proxy-updater-tray.desktop`), and the helper's
+> launcher is hidden (`NoDisplay=true`) — there is exactly ONE icon. If the old
+> widget is still in your panel, remove it with `forest-clean-desktop` (no root).
+
+| Click | Windows | Linux XEmbed (XFCE/MATE/Cinnamon/LXQt) | KDE Plasma / Wayland (our window) |
 |---|---|---|---|
 | right | our animated menu | our animated menu | our animated menu |
 | left | nothing | nothing | nothing |
-| Ctrl+left | — | — | our menu (fallback, see below) |
+| hover | Windows tooltip | Qt tooltip | our status tooltip |
 
-Add the plasmoid: right-click the panel → **Add Widgets…** → *FOREST Proxy
-Updater* → drag it onto the panel. If your panel intercepts the right click with
-its own widget menu, use **Ctrl+left click** — Plasma sometimes keeps the right
-click for the widget's own context menu; that is a panel behaviour, not a defect
-of the menu. Details: `plasma/plasmoid/org.forest.proxyupdater/README.md`.
-Details: `docs/LINUX-ARCHITECTURE.ru.md`, section 5.
+If a Wayland session has **no Xwayland** (`DISPLAY` unset) there is no way to
+position a window: the program honestly stays on the tray (SNI) icon. There is
+still exactly one icon, but in Plasma a right click on it opens the tray's menu —
+a protocol limitation, not a program defect. Install `xorg-xwayland` (it is in
+optdepends).
 
 If there is no graphical
 session or the card cannot be shown (window failure), the fallback kicks in — a

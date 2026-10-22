@@ -12,6 +12,10 @@
 #
 # Требуется dpkg-deb (Debian/Ubuntu: предустановлен). Сборка НЕ требует root и
 # НЕ требует сети: внутрь кладётся уже готовый ELF со вшитым ядром.
+# Сборщик использует ${BASH_SOURCE}: под sh (в Debian/Ubuntu это dash) будет
+# «Bad substitution», поэтому перезапускаем себя под bash, как написано в
+# README (`sh packaging-linux/build-deb.sh` обязано работать).
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 set -eu
 
 . "$(cd "$(dirname "$0")" && pwd)/lib/common.sh"

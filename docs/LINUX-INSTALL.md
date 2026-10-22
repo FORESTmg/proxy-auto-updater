@@ -26,15 +26,23 @@ tray backend:
   application, so you get **our menu window**, 1:1 with Windows. No `QMenu` is
   handed to the tray any more — that was why the panel used to show Qt's stock
   menu;
-* **KDE Plasma (StatusNotifier)**: the panel owns the right click and would draw
-  its own menu, so the package ships a **plasmoid** for the panel
-  (`/usr/share/plasma/plasmoids/org.forest.proxyupdater`) that draws our icon
-  with the state colour and opens **our** menu (`forest-ui --menu-popup`).
-  Add it: right-click the panel → *Add Widgets…* → *FOREST Proxy Updater*.
+* **KDE Plasma**: the icon is the program's **own window** (`src/tray_popup.py`),
+  not a panel widget and not a StatusNotifier item. It sits at the right edge
+  above the panel (26 px, no frame, always on top, never takes focus, not in the
+  task bar) and the right click opens **our** menu right at the icon. There is
+  nothing to add to the panel: the program raises the icon itself.
 
-The left click opens nothing anywhere. If Plasma keeps the right click for the
-widget's own context menu, use **Ctrl+left click**. Not verified on a live Linux
-desktop — the menu logic and QML syntax are checked, the panels are not.
+> **If the panel widget** (`org.forest.proxyupdater`) was added earlier, remove
+> the leftovers with one command **as the user** (no root):
+> `forest-clean-desktop`. The package no longer ships a plasmoid: the Plasma
+> panel takes the right click on any widget for itself, so the program's menu
+> never reached it.
+
+The left click opens nothing anywhere — by design. Verified with a real screen
+capture on KWin 6 / XWayland (Plasma 6, CachyOS): the icon is visible and the
+menu opens at the icon. Other panels (XFCE, MATE, Cinnamon, LXQt) work the same
+way as long as the session has X11/XWayland.
+
 
 **ВИД МЕНЮ ТРЕЯ НА LINUX (честно).** Меню трея — своё окно (`src/ui_menu.py`,
 Qt.Popup, стиль карточки: цвета/геометрия/кривые из общего `src/ui_style.py`,
@@ -44,15 +52,18 @@ Qt.Popup, стиль карточки: цвета/геометрия/кривы�
 * **XEmbed-панели** (XFCE, MATE, Cinnamon, LXQt): правый клик доходит до
   программы, поэтому открывается **наше окно меню**, 1:1 как в Windows. `QMenu`
   трею больше не отдаётся — именно из-за него панель показывала штатное меню Qt;
-* **KDE Plasma (StatusNotifier)**: правый клик забирает панель, поэтому в пакете
-  едет **плазмоид** (`/usr/share/plasma/plasmoids/org.forest.proxyupdater`): он
-  рисует нашу иконку с цветом состояния и открывает **наше** меню
-  (`forest-ui --menu-popup`). Добавить: правый клик по панели → «Добавить
-  виджеты…» → «FOREST Proxy Updater».
+* **KDE Plasma**: значок — **своё окно программы** (`src/tray_popup.py`), а не
+  виджет панели и не значок лотка. Оно встаёт у правого края над панелью
+  (26 px, без рамки, всегда поверх, фокус не забирает, в панели задач его нет),
+  правый клик открывает **наше** меню ровно у значка. Добавлять в панель ничего
+  не нужно: значок поднимает сама программа.
 
-Левый клик не открывает меню нигде. Если Plasma оставляет правый клик за меню
-виджета — используйте **Ctrl+левый клик**. На живом рабочем столе Linux не
-проверялось: логика меню и синтаксис QML проверены, панели — нет.
+> **Если раньше в панели стоял виджет** (`org.forest.proxyupdater`) — уберите
+> остатки одной командой **от пользователя** (root не нужен):
+> `forest-clean-desktop`. Плазмоида в пакете больше НЕТ.
+
+Левый клик не открывает меню нигде — так и задумано. Проверено снимком экрана
+на KWin 6 / XWayland (Plasma 6, CachyOS).
 
 Contents
 

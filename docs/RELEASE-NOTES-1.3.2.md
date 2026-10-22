@@ -10,6 +10,42 @@
 (`filevers`/`prodvers` = `1, 3, 2, 0`, `FileVersion` = `1.3.2.0`,
 `ProductVersion` = `1.3.2`) и `packaging-linux/lib/common.sh` (`VERSION="1.3.2"`).
 
+> ## ⚠️ Пересборка 1.3.2: плазмоид KDE переписан (оболочка больше не может зависнуть)
+>
+> Первый выпуск 1.3.2 содержал плазмоид, который **запускал внешний процесс из
+> QML по таймеру** (модуль Plasma 5 `Plasma5Support.DataSource`,
+> `engine: "executable"`, `sh read-state.sh` каждые 5 с) и на живом CachyOS
+> (Plasma 6, Wayland) **подвесил оболочку**: панель не рисовалась, клики не
+> работали, CPU гостя 0 %. Плазмоид переписан: **ни одного запуска процессов**
+> (нет `P5Support`/`DataSource`/`executable`/`connectSource`), состояние читается
+> одним асинхронным `XMLHttpRequest` к `file://` раз в 20 с с пропуском тика и
+> сторожем 8 с, любая ошибка → нейтральный серый. Меню открывается через
+> служебный ярлык `forest-proxy-updater-menu.desktop` (`Qt.openUrlExternally`).
+>
+> **Виджет в панель добавляйте ТОЛЬКО из этой пересборки.** Если он уже добавлен
+> из первого выпуска — удалите его (режим правки панели → значок удаления).
+> Цвет состояния показывается, только если в сеансе задано
+> `QML_XHR_ALLOW_FILE_READ=1` (иначе Qt запрещает QML читать файлы; см.
+> `plasma/plasmoid/org.forest.proxyupdater/README.md`).
+>
+> ## ⚠️ Repack of 1.3.2: the KDE plasmoid was rewritten (it can no longer freeze the shell)
+>
+> The first 1.3.2 build shipped a plasmoid that **started an external process from
+> QML on a timer** (Plasma 5 `Plasma5Support.DataSource`,
+> `engine: "executable"`, `sh read-state.sh` every 5 s) and **froze the shell** on
+> a live CachyOS (Plasma 6, Wayland): the panel stopped painting, clicks did
+> nothing, guest CPU stayed at 0 %. The plasmoid now launches **no processes at
+> all**; the state is read by one asynchronous `XMLHttpRequest` against `file://`
+> every 20 s, ticks are skipped while a request is in flight, a watchdog drops a
+> stuck request after 8 s, and every failure yields the neutral grey. The menu is
+> opened through the shipped launcher `forest-proxy-updater-menu.desktop`
+> (`Qt.openUrlExternally`).
+>
+> **Add the panel widget ONLY from this repack.** If you added the widget from the
+> first build, remove it (panel edit mode → delete icon). The state colour is
+> shown only when the session exports `QML_XHR_ALLOW_FILE_READ=1` (Qt blocks QML
+> file reads otherwise; see `plasma/plasmoid/org.forest.proxyupdater/README.md`).
+>
 > **ОГРАНИЧЕНИЯ ПРОВЕРКИ (RU):** проверка Linux-пакетов выполнялась в среде **WSL**
 > (Linux внутри Windows), а не на установленной системе на реальном железе. Меню и
 > уведомления графического интерфейса на Linux проверены логически, в offscreen-режиме
@@ -153,10 +189,13 @@
 
 Плазмоид во всех трёх системных пакетах лежит ровно в
 `/usr/share/plasma/plasmoids/org.forest.proxyupdater/` и побайтово равен репозиторному
-(`metadata.json` `8150000e…`, `contents/ui/main.qml` `5e3ffcc9…`,
-`contents/code/read-state.sh` `1145afa4…`). В `.deb` есть оба симлинка в `PATH`
+(`metadata.json` `8150000e…`, `contents/ui/main.qml` `9b9f6f5a…`,
+`contents/ui/StateReader.qml` `71d13d8a…`). Скрипта `contents/code/read-state.sh` в
+плазмоиде больше НЕТ: состояние читается `XMLHttpRequest`'ом из QML, исполняемых
+файлов внутри плазмоида ноль. В `.deb` есть оба симлинка в `PATH`
 (`/usr/bin/forest-proxy-updater` и `/usr/bin/forest-ui` → `/usr/lib/forest-proxy-updater/`),
-юниты `forest-proxy-updater.service` / `-refresh.service` / `.timer`, оба `.desktop`,
+юниты `forest-proxy-updater.service` / `-refresh.service` / `.timer`, три `.desktop`
+(включая служебный `forest-proxy-updater-menu.desktop` для виджета панели),
 значок 256×256, документация (`README.md`, `INSTALL.md`, `INSTALL.ru.md`, `TERMS.md`,
 `TERMS.ru.md`, `copyright`, `COPYING`).
 

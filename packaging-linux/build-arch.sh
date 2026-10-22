@@ -12,6 +12,9 @@
 # Требуется makepkg + fakeroot (Arch: pacman -S --needed base-devel fakeroot или
 # хотя бы fakeroot). makepkg ОТКАЗЫВАЕТСЯ работать от root — поэтому при запуске
 # от root скрипт сам понижает права до непривилегированного пользователя.
+# Сборщик использует ${BASH_SOURCE}: под sh (в Debian/Ubuntu это dash) будет
+# «Bad substitution», поэтому перезапускаем себя под bash.
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 set -eu
 
 . "$(cd "$(dirname "$0")" && pwd)/lib/common.sh"
@@ -81,11 +84,9 @@ install -m 0644 "$STAGE$PREFIX/share/applications/$APP-ui.desktop" \
                                                   "$SRC/forest-proxy-updater-ui.desktop"
 install -m 0644 "$STAGE$PREFIX/share/icons/hicolor/256x256/apps/$APP.png" \
                                                   "$SRC/forest-proxy-updater.png"
-# Плазмоид KDE — тоже «плоско» (раскладку собирает package() из PKGBUILD).
-install -m 0644 "$STAGE$PLASMOID_DEST/metadata.json"         "$SRC/plasmoid-metadata.json"
-install -m 0644 "$STAGE$PLASMOID_DEST/contents/ui/main.qml"  "$SRC/plasmoid-main.qml"
-install -m 0755 "$STAGE$PLASMOID_DEST/contents/code/read-state.sh" \
-                                                  "$SRC/plasmoid-read-state.sh"
+# Автозапуска у значка нет: его поднимает САМА программа в сеансе пользователя
+# (watch.py -> ui_helper.ensure). Уборка панели — «плоско», раскладку делает package().
+install -m 0755 "$STAGE$LIBDIR/$CLEAN_NAME"       "$SRC/forest-clean-desktop"
 # версия из окружения (если переопределена)
 sed -i "s|^pkgver=.*|pkgver=$VERSION|; s|^pkgrel=.*|pkgrel=$RELEASE|" "$SRC/PKGBUILD"
 say "PKGBUILD: $SRC/PKGBUILD (pkgver=$VERSION, pkgrel=$RELEASE)"

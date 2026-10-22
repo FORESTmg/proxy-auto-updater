@@ -11,6 +11,10 @@
 # Требуется rpmbuild: openSUSE — `zypper install rpm-build`, Fedora/RHEL —
 # `dnf install rpm-build`. Rocky/CIQ-образ без rpmbuild собрать .rpm не может —
 # собирайте в openSUSE или Debian/Ubuntu с пакетом rpm.
+# Сборщик использует ${BASH_SOURCE}: под sh (в Debian/Ubuntu это dash) будет
+# «Bad substitution», поэтому перезапускаем себя под bash, как написано в
+# README (`sh packaging-linux/build-rpm.sh` обязано работать).
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 set -eu
 
 . "$(cd "$(dirname "$0")" && pwd)/lib/common.sh"

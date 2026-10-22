@@ -43,6 +43,26 @@ packaging-linux/work/
 # логи прогонов стенда linux/tests/run-matrix.sh
 linux/tests/matrix-*/
 
+# стендовые прогоны матрицы DE (docs/de-matrix/): в репозиторий идут только
+# страницы отчётов и снимки экрана. Журналы, состояние и harness-скрипты стенда
+# (Xvfb/openbox/xdotool, личные пути) остаются локально — они пересобираются.
+/docs/de-matrix/*/logs/
+/docs/de-matrix/*/root/
+/docs/de-matrix/*/harness/
+
+# секреты и локальные копии — в репозиторий не попадают никогда
+.env
+.env.*
+*.pem
+*.key
+.backup-*
+*.bak
+*.orig
+
+# тестовые пакеты прошлых версий: нужны только на стенде, не в дереве
+test-packages/
+baseline/
+
 # редакторы / ОС
 .idea/
 .vscode/

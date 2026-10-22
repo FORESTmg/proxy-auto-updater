@@ -56,6 +56,9 @@ GNOME_KEYS = ("gnome", "ubuntu", "unity", "cinnamon", "budgie", "pop",
 
 # Имена процессов — резерв, когда переменные окружения пусты (запуск из cron,
 # из системной службы, из ssh-сессии: там XDG_CURRENT_DESKTOP не выставлен).
+# ВАЖНО: имя процесса берётся из ``/proc/<pid>/comm``, а там не больше 15
+# символов. Поэтому «kwin_wayland_wrapper» лежит ОБРЕЗАННЫМ до
+# ``kwin_wayland_wr`` — иначе запись не совпала бы никогда.
 KDE_PROCS = ("kwin_wayland", "kwin_x11", "kwin", "plasmashell",
              "plasma_session", "startplasma-wayland", "startplasma-x11")
 GNOME_PROCS = ("gnome-shell", "gnome-session-binary", "cinnamon", "mate-panel",
@@ -63,7 +66,7 @@ GNOME_PROCS = ("gnome-shell", "gnome-session-binary", "cinnamon", "mate-panel",
 # Любой графический сеанс (для поиска сеанса, а не для определения стола).
 GRAPHICAL_PROCS = tuple(KDE_PROCS) + tuple(GNOME_PROCS) + (
     "Xorg", "Xwayland", "sway", "i3", "Hyprland", "weston", "labwc",
-    "wayfire", "river", "openbox", "kwin_wayland_wrapper")
+    "wayfire", "river", "openbox", "kwin_wayland_wr")
 
 ENV_KEYS = ("XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP", "DESKTOP_SESSION",
             "KDE_FULL_SESSION", "KDE_SESSION_VERSION",
@@ -242,8 +245,14 @@ def scan_sessions(proc_root: str = "/proc", graphical_only: bool = True,
         env = _read_environ(pid, proc_root)
         if not (env.get("DBUS_SESSION_BUS_ADDRESS") or env.get("XDG_RUNTIME_DIR")):
             continue
-        if not (env.get("WAYLAND_DISPLAY") or env.get("DISPLAY")
-                or env.get("DBUS_SESSION_BUS_ADDRESS")):
+        # ДИСПЛЕЙ ОБЯЗАТЕЛЕН. Процесс сеанса без своего DISPLAY/
+        # WAYLAND_DISPLAY — не тот, от чьего имени можно показать окно:
+        # ``kwin_wayland`` (композитор) живёт в сеансе и имеет шину D-Bus, но
+        # дисплея у него НЕТ (он его сам создаёт). Пока фильтр пропускал такие
+        # процессы, помощник интерфейса поднимался с окружением композитора —
+        # без DISPLAY — и честно выходил («нет графической сессии»), а значка
+        # на экране не было. Живой случай: Plasma 6 на Wayland, KWin 6.
+        if not (env.get("WAYLAND_DISPLAY") or env.get("DISPLAY")):
             continue
         found.append({"pid": int(pid), "uid": uid,
                       "user": env.get("USER") or _user_name(uid),
@@ -302,9 +311,18 @@ def find_graphical_session(env: dict = None, proc_root: str = "/proc",
 
 
 def run_in_session(cmd: list, sess: dict, timeout: int = 8) -> subprocess.CompletedProcess:
-    """Выполнить команду в сеансе пользователя (root -> ``runuser``, env сеанса)."""
+    """Выполнить команду в сеансе пользователя (root -> ``runuser``, env сеанса).
+
+    D2 (1.3.9): окружение НАСЛЕДУЕТСЯ, кроме переменных PyInstaller-бандла.
+    ``LD_LIBRARY_PATH=/tmp/_MEI…`` заставлял системный ``gsettings`` грузить
+    glib из распакованного бандла — он отвечал ``default`` и не видел тему, а
+    настройки прокси «записывались», но не читались. ``PYTHONHOME``/``PYTHONPATH``
+    бандла ломают чужие python-обёртки в сеансе. Значения из env САМОГО сеанса
+    (``sess["env"]``) при этом сохраняются — это окружение рабочего стола.
+    """
     full = list(sess.get("prefix") or []) + list(cmd)
-    env = dict(os.environ)
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("LD_LIBRARY_PATH", "PYTHONHOME", "PYTHONPATH")}
     env.update({k: v for k, v in (sess.get("env") or {}).items() if v})
     uid = sess.get("uid")
     if uid not in (None, 0) and _safe_pw(int(uid)):

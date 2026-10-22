@@ -2,29 +2,33 @@
 // Copyright (C) 2026 FOREST
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// Что это: НАСТОЯЩАЯ иконка программы в панели KDE. Панель KDE работает по
-// протоколу StatusNotifier, и там правый клик по значку забирает САМА панель:
-// приложение такого клика не получает, поэтому своё окно меню показать не может
-// (ограничение протокола). Этот плазмоид закрывает разрыв: он читает состояние
-// из tray_status.json, рисует нашу иконку с цветом состояния, а по клику
-// запускает `forest-ui --menu-popup` — то есть РОВНО наше меню, с нашими
-// анимациями и подменю, а не меню панели.
+// Что это: значок программы в панели KDE. Панель KDE работает по протоколу
+// StatusNotifier и забирает правый клик по значку себе, поэтому своё окно меню
+// приложение показать не может. Плазмоид закрывает разрыв: рисует нашу иконку с
+// цветом состояния и по клику открывает НАШЕ меню (forest-ui --menu-popup).
+//
+// ЧЕГО ЗДЕСЬ НЕТ И БЫТЬ НЕ МОЖЕТ (после инцидента в 1.3.2):
+//   * Plasma5Support / P5Support и любых DataSource с engine:'executable';
+//   * запуска процессов из QML по таймеру;
+//   * коротких интервалов опроса (только один длинный, 20 с);
+//   * синхронного ввода-вывода и записи на диск.
+// Состояние читается XMLHttpRequest'ом к file:// (см. StateReader.qml) — это
+// чтение файла, а не запуск программы: один асинхронный запрос раз в 20 секунд,
+// тик пропускается, если предыдущий запрос ещё не ответил.
 //
 // Кнопки:
-//   * ПРАВАЯ кнопка — наше меню (как у значка в трее и как в Windows);
-//   * ЛЕВАЯ кнопка — ничего (одинаковое поведение на всех платформах);
-//   * Ctrl + ЛЕВАЯ кнопка — наше меню. Это запасной путь: часть панелей KDE
-//     перехватывает правый клик своим контекстным меню виджета, и тогда
-//     остаётся этот вариант (честно описано в README рядом с плазмоидом).
+//   * ПРАВАЯ — наше меню;
+//   * ЛЕВАЯ — ничего (одинаково на всех платформах);
+//   * Ctrl + ЛЕВАЯ — наше меню, запасной путь (часть панелей перехватывает
+//     правый клик своим контекстным меню виджета).
 
 import QtQuick
 import org.kde.plasma.plasmoid
 import org.kde.kirigami as Kirigami
-import org.kde.plasma.plasma5support as P5Support
 
-// Идентификаторы внешних объектов (root, art, clickArea) используются внутри
-// вложенного компонента compactRepresentation — с этим прагма QML связывает их
-// явно, и qmllint не выдаёт предупреждений «Unqualified access».
+// Идентификаторы внешних объектов (root и вложенные элементы) используются
+// внутри compactRepresentation — прагма связывает их явно, и qmllint не ругается
+// на «Unqualified access».
 pragma ComponentBehavior: Bound
 
 PlasmoidItem {
@@ -32,12 +36,19 @@ PlasmoidItem {
 
     preferredRepresentation: compactRepresentation
     toolTipMainText: "FOREST — обновление прокси"
-    toolTipSubText: root.stateText
+    toolTipSubText: root.stateTip.length ? root.stateTip : root.stateText
 
-    // ── состояние из файла программы ───────────────────────────────────────
-    property string stateKind: ""          // ok|busy|switch|restoring|error|down|off|noanswer
-    property string stateTip: ""           // готовая подсказка сторожа (если есть)
-    property bool launching: false         // защита от второго меню по двойному клику
+    // ── состояние из файла программы ────────────────────────────────────────
+    property string stateKind: ""      // ok|busy|switch|restoring|error|down|off|noanswer
+    property string stateTip: ""       // готовая подсказка сторожа (если есть)
+    property bool launching: false     // защита от второго меню по двойному клику
+    property bool artReady: false      // наша картинка загрузилась
+
+    // Ярлык, который открывает наше меню. Это .desktop из нашего же пакета
+    // (NoDisplay=true, Exec=… --menu-popup): QML просит рабочий стол запустить
+    // приложение и сразу возвращает управление. Ни ожидания процесса, ни
+    // оболочки команд, ни DataSource — подвиснуть нечему.
+    readonly property string menuLauncher: "file:///usr/share/applications/forest-proxy-updater-menu.desktop"
 
     // Цвета состояний — ТЕ ЖЕ, что в палитре программы (src/ui_style.py,
     // таблица state_*), иначе значок в панели и наше меню разошлись бы цветом.
@@ -51,7 +62,9 @@ PlasmoidItem {
         "off":       "#9497a0",
         "noanswer":  "#9497a0"
     })
-    readonly property color stateColor: statePalette[root.stateKind] || "#9aa0a6"
+    // Неизвестное/пустое состояние — НЕЙТРАЛЬНЫЙ серый, а не выдуманный цвет.
+    readonly property color stateColor: root.statePalette[root.stateKind] || "#9aa0a6"
+
     readonly property string stateText: {
         switch (root.stateKind) {
         case "ok":        return "связь есть";
@@ -65,81 +78,43 @@ PlasmoidItem {
         default:          return "нет данных о состоянии";
         }
     }
-    property bool artReady: false   // наша картинка загрузилась (иначе значок темы)
 
-    // ── меню: отдельный процесс forest-ui без значка в трее ────────────────
+    // Чтение состояния: асинхронный XHR к file://, раз в 20 с, без процессов.
+    StateReader {
+        id: reader
+        pollInterval: 20000
+        onStateUpdated: function (kind, tip) {
+            root.stateKind = kind;
+            root.stateTip = tip;
+        }
+    }
+
+    // ── меню: просьба рабочему столу открыть наш ярлык меню ─────────────────
     function openMenu() {
         if (root.launching)
             return;
         root.launching = true;
-        // Без координат: курсор в момент клика стоит НА иконке, и forest-ui
-        // ставит меню по курсору с учётом монитора и масштаба (DPI).
-        exec.connectSource("forest-ui --menu-popup");
-        launchGuard.restart();
-    }
-
-    P5Support.DataSource {
-        id: exec
-        engine: "executable"
-        connectedSources: []
-        onNewData: function (sourceName, data) {
-            root.launching = false;
-            exec.disconnectSource(sourceName);
+        menuGuard.restart();
+        var ok = false;
+        try {
+            ok = Qt.openUrlExternally(root.menuLauncher);
+        } catch (e) {
+            ok = false;                  // нет обработчика/портала — просто ничего
         }
+        if (!ok)
+            root.launching = false;
     }
 
-    // Если процесс не ответил (нет forest-ui в PATH) — снимаем блокировку,
-    // иначе меню больше не открылось бы вовсе.
+    // Снимаем блокировку через 2.5 с: даже если ярлык не открылся, следующий
+    // клик снова сработает. Таймер короткий, но он НИЧЕГО не запускает.
     Timer {
-        id: launchGuard
-        interval: 4000
+        id: menuGuard
+        interval: 2500
         repeat: false
         onTriggered: root.launching = false
     }
 
-    // ── чтение состояния: раз в 5 с, плюс при старте ──────────────────────
-    function refreshState() {
-        var path = String(Qt.resolvedUrl("../code/read-state.sh")).replace("file://", "");
-        stateSrc.connectSource("sh '" + path + "' 2>/dev/null");
-    }
-
-    function applyState(text) {
-        var txt = String(text || "").trim();
-        if (!txt.length) {                 // файла нет/нечитаем — нейтральный цвет
-            root.stateKind = "";
-            root.stateTip = "";
-            return;
-        }
-        try {
-            const j = JSON.parse(txt);
-            root.stateKind = String(j.state || "");
-            root.stateTip = String(j.tip || "");
-        } catch (e) {
-            root.stateKind = "";
-            root.stateTip = "";
-        }
-    }
-
-    P5Support.DataSource {
-        id: stateSrc
-        engine: "executable"
-        connectedSources: []
-        onNewData: function (sourceName, data) {
-            var out = (data && data["stdout"]) ? data["stdout"] : "";
-            stateSrc.disconnectSource(sourceName);
-            root.applyState(out);
-        }
-    }
-
-    Timer {
-        interval: 5000
-        running: true
-        repeat: true
-        triggeredOnStart: true
-        onTriggered: root.refreshState()
-    }
-
-    // ── вид значка: наша иконка + метка состояния ─────────────────────────
+    // ── вид значка: наша иконка + метка состояния ───────────────────────────
     compactRepresentation: MouseArea {
         id: clickArea
         implicitWidth: Kirigami.Units.iconSizes.smallMedium
@@ -155,7 +130,7 @@ PlasmoidItem {
                        && (mouse.modifiers & Qt.ControlModifier)) {
                 root.openMenu();                       // запасной путь: Ctrl+левая
             }
-            // левая кнопка без модификатора — НИЧЕГО (как у значка в трее)
+            // левая кнопка без модификатора — НИЧЕГО
         }
 
         Image {
@@ -174,14 +149,16 @@ PlasmoidItem {
             Component.onCompleted: root.artReady = (status === Image.Ready)
         }
 
-        // Нашей картинки нет (установка без значка) — тематический значок,
-        // окрашенный в цвет состояния.
-        Kirigami.Icon {
+        // Нашей картинки нет (установка без значка) — простой кружок цвета
+        // состояния. Никаких иконочных API: QtQuick рисует сам, и отказать
+        // здесь нечему.
+        Rectangle {
             anchors.fill: art
             visible: !root.artReady
-            source: "network-vpn"
-            color: root.stateColor
-            isMask: true
+            radius: width / 2
+            color: "transparent"
+            border.width: Math.max(2, Math.round(width * 0.22))
+            border.color: root.stateColor
         }
 
         // Метка состояния в правом нижнем углу — как у значка в трее Windows

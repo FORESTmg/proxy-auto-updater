@@ -9,6 +9,12 @@ Comment[ru]=Значок в трее, меню и уведомления для 
 Exec=@EXEC@
 Icon=forest-proxy-updater
 Terminal=false
+# ВТОРОГО значка в меню быть не должно: значок программы — ОДИН (в стиле
+# трея), и он поднимается сам при входе в сеанс (см. autostart-файл
+# forest-proxy-updater-tray.desktop). Этот ярлык остаётся только для ручного
+# запуска из терминала: `forest-ui --tray-icon`.
+NoDisplay=true
+StartupNotify=false
 Categories=Network;
 Keywords=proxy;xray;v2ray;vless;vmess;tunnel;tray;
 # Помощник интерфейса (Qt): значок в трее, меню с подменю и уведомления.

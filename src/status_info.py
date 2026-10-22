@@ -109,6 +109,32 @@ def pool_n(cfg: dict, st: dict = None) -> int:
         return 10
 
 
+def age_of(st: dict) -> float:
+    """Возраст записи состояния в секундах; <0 — данных нет вовсе.
+
+    Порядок: поле ``ts`` (его пишет сторож), затем ``_mtime`` файла (его кладёт
+    ``tray_status.read_status``, если в записи нет ts — старая версия программы
+    или чужой файл), и только потом «данных нет». Без этой подстраховки запись
+    без ``ts`` считалась вечно устаревшей и значок показывал «сторож молчит»,
+    хотя состояние было свежим.
+    """
+    st = st or {}
+    if not st:
+        return -1.0
+    try:
+        ts = float(st.get("ts") or 0)
+    except Exception:
+        ts = 0.0
+    if ts <= 0:
+        try:
+            ts = float(st.get("_mtime") or 0)
+        except Exception:
+            ts = 0.0
+    if ts <= 0:
+        return -1.0
+    return max(0.0, time.time() - ts)
+
+
 def state_key(cfg: dict, st: dict) -> str:
     """Одно из шести состояний значка.
 
@@ -116,12 +142,9 @@ def state_key(cfg: dict, st: dict) -> str:
     идущее восстановление -> restoring; иначе — поле state.
     """
     st = st or {}
-    if not st:
+    age = age_of(st)
+    if age < 0:
         return "noanswer"
-    try:
-        age = time.time() - float(st.get("ts", 0) or 0)
-    except Exception:
-        age = 0.0
     if age > STALE_S:
         return "noanswer"
     proc = st.get("proc") or {}
@@ -147,14 +170,8 @@ def tip(cfg: dict, st: dict, limit: int = 63, lang: str = "ru") -> str:
     целиком — данные не теряем.
     """
     st = st or {}
-    if not st:
-        return (f"FOREST: {TIP_NODATA_RU}" if lang == "ru"
-                else "FOREST: watchdog silent (no data)")
-    try:
-        age = time.time() - float(st.get("ts", 0) or 0)
-    except Exception:
-        age = 0.0
-    if age > STALE_S:
+    age = age_of(st)
+    if age < 0 or age > STALE_S:
         return (f"FOREST: {TIP_NODATA_RU}" if lang == "ru"
                 else "FOREST: watchdog silent (no data)")
     key = state_key(cfg, st)
@@ -343,7 +360,7 @@ def info_lines(cfg: dict, st: dict, lang: str = "ru") -> list:
     rows.append(("серверов в пуле", str(pool_n(cfg, st))))
     rows.append(("маршрут", route_text(cfg, lang)))
     try:
-        age = time.time() - float(st.get("ts", 0) or 0)
+        age = age_of(st)
     except Exception:
         age = -1
     if age < 0:

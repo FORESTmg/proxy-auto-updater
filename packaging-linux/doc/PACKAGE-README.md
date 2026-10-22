@@ -38,23 +38,37 @@ possible. If something does not work, please report it in the repository.
 | Состояние, кэши, сторожевые файлы | `/var/lib/forest-proxy-updater/state/forest-proxy-updater/` |
 | Логи | `/var/lib/forest-proxy-updater/state/forest-proxy-updater/logs/main.log` и journal |
 | Юниты systemd | `/usr/lib/systemd/system/forest-proxy-updater*.{service,timer}` |
-| Плазмоид KDE (значок в панели Plasma + наше меню) | `/usr/share/plasma/plasmoids/org.forest.proxyupdater/` |
+| Значок в стиле трея (рисует сама программа) | окно процесса `forest-ui`, отдельных файлов в системе не требует |
+| Уборка панели от старого виджета | `/usr/bin/forest-clean-desktop` → `/usr/lib/forest-proxy-updater/forest-clean-desktop` |
 | Лицензия GPL-3.0 | `/usr/share/licenses/forest-proxy-updater/COPYING` |
 | Документация | `/usr/share/doc/forest-proxy-updater/` |
 
-## Значок в панели KDE (плазмоид)
+## Значок: одно окно в стиле трея
 
-В KDE Plasma правый клик по значку трея забирает сама панель (протокол
-StatusNotifier), поэтому в пакет входит наш плазмоид — он рисует иконку с цветом
-состояния и по клику открывает **наше** меню программы:
+Плазмоида в пакете **нет** и не будет: правый клик по ЛЮБОМУ виджету панели
+Plasma забирает сама панель (в меню приходят «Настроить виджет / Режим
+редактирования / Удалить виджет»), поэтому меню программы до виджета не
+доходило. Значок — **своё окно программы** (`src/tray_popup.py`):
 
-1. правый клик по панели → **«Добавить виджеты…»**;
-2. найти **«FOREST Proxy Updater»** (можно набрать `forest` в поиске);
-3. перетащить на панель.
+* 26 px, без рамки, всегда поверх, у правого края над панелью, фокус не
+  забирает (`WA_ShowWithoutActivating` + `WindowDoesNotAcceptFocus`);
+* в панели задач его нет (`_NET_WM_STATE_SKIP_TASKBAR`), в списке окон — тоже;
+* **правый клик** — наше меню ровно у значка; **левый** — ничего;
+  **наведение** — подсказка с цветом состояния;
+* в полноэкранных приложениях значок прячется.
 
-Кнопки: правая — наше меню, левая — ничего, **Ctrl+левая** — наше меню (запасной
-путь, если ваша панель оставляет правый клик за меню виджета). Отдельный пакет
-для плазмоида не нужен.
+Добавлять ничего не нужно: значок поднимает сама программа при запуске службы.
+Если раньше в панели стоял виджет `org.forest.proxyupdater`, уберите остатки
+**от пользователя** (root не нужен):
+
+```sh
+forest-clean-desktop            # убрать виджет и закреплённый ярлык
+forest-clean-desktop --dry-run  # только показать, что будет сделано
+```
+
+Скрипт правит конфиг панели теми же инструментами KDE (`kreadconfig6` /
+`kwriteconfig6`), делает копию конфига рядом и обновляет кеши (`kbuildsycoca6`,
+`qdbus6 org.kde.KWin /KWin reconfigure`).
 
 ## Служба
 

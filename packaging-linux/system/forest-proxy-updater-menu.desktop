@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=FOREST's Proxy Auto-updater (menu)
+Name[ru]=FOREST's Proxy Auto-updater (меню)
+Comment=Shows the updater's own menu at the mouse pointer (used by the KDE panel widget)
+Comment[ru]=Показывает наше меню программы у курсора (используется виджетом панели KDE)
+Exec=@EXEC@ --menu-popup
+Icon=forest-proxy-updater
+Terminal=false
+NoDisplay=true
+StartupNotify=false
+Categories=Network;
+Keywords=proxy;menu;tray;
+# Служебный ярлык БЕЗ пункта в меню приложений (NoDisplay=true). Нужен только
+# виджету панели KDE: QML не запускает процессы сам, а просит рабочий стол
+# открыть этот ярлык (Qt.openUrlExternally) — отсюда и берётся
+# `forest-ui --menu-popup`. Ручной запуск тоже безопасен: покажется наше меню.

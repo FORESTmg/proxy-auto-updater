@@ -61,14 +61,104 @@ def status_path(cfg: dict) -> str:
     return os.path.join(_cfg_or_default(cfg)["paths"]["state_dir"], NAME)
 
 
-def read_status(cfg: dict) -> dict:
-    """Читает состояние. Пустой словарь — если файла нет или он битый."""
+def state_dirs(cfg: dict) -> list:
+    """Все каталоги, где МОЖЕТ лежать состояние, — в порядке приоритета.
+
+    Зачем список: служба и помощник интерфейса могут получить РАЗНОЕ окружение
+    (служба задаёт ``XDG_STATE_HOME``/``FOREST_ROOT`` в юните, помощник
+    поднимается в сеансе пользователя и наследует уже своё). Когда пути
+    расходились, значок читал несуществующий файл и показывал «сторож молчит
+    (нет данных)», хотя служба писала свежий статус рядом. Поэтому читаем ВСЕ
+    известные места и берём самый свежий файл, а пишем всегда в основной.
+    """
+    out = []
+
+    def add(d):
+        if not d:
+            return
+        try:
+            d = os.path.abspath(d)
+        except Exception:
+            return
+        if d not in out:
+            out.append(d)
+
     try:
-        with open(status_path(cfg), encoding="utf-8") as f:
+        add((cfg or {}).get("paths", {}).get("state_dir"))
+    except Exception:
+        pass
+    try:
+        add(_cfg_or_default(cfg)["paths"]["state_dir"])
+    except Exception:
+        pass
+    root = os.environ.get("FOREST_ROOT")
+    if root:
+        add(os.path.join(root, "state"))
+    if os.name != "nt":
+        # системный каталог службы (юнит: StateDirectory + XDG_STATE_HOME)
+        add(os.path.join("/var/lib", "forest-proxy-updater", "state",
+                         "forest-proxy-updater"))
+        add(os.path.join("/var/lib", "forest-proxy-updater", "state"))
+        add(os.path.join("/var/lib", "forest-proxy-updater"))
+        add("/run/forest-proxy-updater")
+        xdg = os.environ.get("XDG_STATE_HOME")
+        if not xdg or not os.path.isabs(xdg):
+            xdg = os.path.join(os.path.expanduser("~"), ".local", "state")
+        add(os.path.join(xdg, "forest-proxy-updater"))
+        add(os.path.join(xdg, "forest-proxy-updater", "state"))
+    return out
+
+
+def _read_file(p: str) -> dict:
+    try:
+        with open(p, encoding="utf-8") as f:
             d = json.load(f)
         return d if isinstance(d, dict) else {}
     except Exception:
         return {}
+
+
+def _stamp(st: dict, path: str) -> float:
+    """«Возраст» записи: поле ts, иначе время изменения файла."""
+    try:
+        ts = float(st.get("ts") or 0)
+    except Exception:
+        ts = 0.0
+    if ts > 0:
+        return ts
+    try:
+        return float(os.path.getmtime(path))
+    except Exception:
+        return 0.0
+
+
+def read_status(cfg: dict) -> dict:
+    """Читает состояние — САМЫЙ СВЕЖИЙ из всех известных каталогов.
+
+    Пустой словарь — если ни одного файла нет (или все битые). В результат
+    добавляются служебные поля ``_path`` и ``_mtime``: по ним видно, какой
+    именно файл прочитан (это печатает диагностика и пишется в журнал).
+    """
+    best, best_ts, best_p = {}, -1.0, ""
+    for d in state_dirs(cfg):
+        p = os.path.join(d, NAME)
+        if not os.path.isfile(p):
+            continue
+        st = _read_file(p)
+        if not st:
+            continue
+        ts = _stamp(st, p)
+        if ts > best_ts:
+            best, best_ts, best_p = st, ts, p
+    if not best:
+        return {}
+    best = dict(best)
+    best["_path"] = best_p
+    try:
+        best["_mtime"] = float(os.path.getmtime(best_p))
+    except Exception:
+        best["_mtime"] = 0.0
+    return best
 
 
 def write_status(cfg: dict, state: str = None, proc: dict = None,
@@ -78,7 +168,11 @@ def write_status(cfg: dict, state: str = None, proc: dict = None,
     drop_proc=True — убрать окно-прогрессбар (процесс завершён).
     """
     p = status_path(cfg)
-    d = read_status(cfg)
+    # читаем ИМЕННО свой файл: read_status() отдаёт самый свежий из всех
+    # каталогов и добавляет служебные поля — в запись они попадать не должны
+    d = _read_file(p)
+    for k in ("_path", "_mtime"):
+        d.pop(k, None)
     d["ts"] = time.time()
     if state:
         d["state"] = state

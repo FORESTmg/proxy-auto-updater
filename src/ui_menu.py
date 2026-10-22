@@ -209,6 +209,59 @@ def dump_rows(rows) -> str:
 
 
 # ══════════════════════════════════════════════════════════════ панель меню ═══
+class _ClickCatcher(QtWidgets.QWidget if QT_OK else object):
+    """Прозрачный слой НА ВЕСЬ ЭКРАН под меню: клик в любом месте закрывает меню.
+
+    Зачем отдельное окно: ``Qt.Popup`` закрывается сам только если система
+    отдала нажатие меню (X grab). На Wayland/XWayland захвата нет — клик мимо
+    меню уходит в чужое окно, и меню остаётся висеть (именно это и видел
+    пользователь: меню закрывалось только у значка). Слой лежит НИЖЕ меню
+    (``Qt.Popup`` — override-redirect, он всегда выше управляемых окон) и
+    ВЫШЕ остальных окон приложения, поэтому:
+
+    * клик по пункту меню доходит ДО МЕНЮ (слой его не съедает);
+    * любой другой клик попадает в слой и закрывает меню.
+
+    Непрозрачность 1 %: слой не виден, но остаётся обычным окном — прозрачность
+    окна не отменяет доставку ввода (в отличие от WA_TransparentForMouseEvents).
+    """
+
+    clicked = QtCore.Signal()
+
+    def __init__(self, screen):
+        super().__init__(None, Qt.Window | Qt.FramelessWindowHint
+                         | Qt.WindowStaysOnTopHint | Qt.NoDropShadowWindowHint
+                         | Qt.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setWindowOpacity(0.01)
+        self.setWindowTitle("FOREST menu catcher")
+        try:
+            self.setGeometry(screen.geometry())
+        except Exception:
+            pass
+
+    def paintEvent(self, _ev) -> None:
+        p = QtGui.QPainter(self)
+        try:
+            p.fillRect(self.rect(), QtGui.QColor(0, 0, 0, 3))
+        finally:
+            p.end()
+
+    def mousePressEvent(self, ev) -> None:
+        ev.accept()
+        self.clicked.emit()
+
+    def mouseReleaseEvent(self, ev) -> None:
+        ev.accept()
+
+    def keyPressEvent(self, ev) -> None:
+        if ev.key() in (Qt.Key_Escape, Qt.Key_Enter, Qt.Key_Return):
+            ev.accept()
+            self.clicked.emit()
+
+
 class PopupMenu(QtWidgets.QWidget if QT_OK else object):
     """Одно всплывающее окно меню: корневое меню или подменю."""
 
@@ -245,6 +298,7 @@ class PopupMenu(QtWidgets.QWidget if QT_OK else object):
         self._dropped = 0
         self._row_k = [0.0] * len(self.rows)    # прогресс подсветки/цвета строки
         self._chk_k = [0.0] * len(self.rows)    # прогресс галочки
+        self._catchers = []                    # слои «клик мимо меню» (только у корня)
         self._hl_y = 0.0
         self._hl_to = 0.0
         self._hl_op = 0.0
@@ -675,16 +729,72 @@ class PopupMenu(QtWidgets.QWidget if QT_OK else object):
         self._last = 0.0
         self._next_due = time.perf_counter()
         self._phase = "in"
+        if self.parent() is None:
+            # корневое меню кладёт под себя прозрачный слой на весь экран;
+            # подменю живёт в ветке корня и своего слоя НЕ создаёт
+            self._show_catchers(cursor)
         self.show()
         self.raise_()
         self._ticker.start()
         self.update()
         return self.stats
 
+    # ─────────────────────────────── слой «клик мимо меню» (см. _ClickCatcher) ──
+    def _show_catchers(self, pos=None) -> None:
+        """Поставить прозрачный слой на КАЖДЫЙ экран (клик в любом месте).
+
+        Слой показывается ДО меню, поэтому оказывается ниже него в порядке
+        наложения; меню (``Qt.Popup``) рисуется поверх. Снимается вместе с
+        меню — в :meth:`_finish` и сразу при начале закрытия.
+        """
+        self._hide_catchers()
+        if not QT_OK:
+            return
+        try:
+            screens = list(QtGui.QGuiApplication.screens())
+        except Exception:
+            screens = []
+        scr = self.screen_for(pos)
+        if scr is not None:
+            screens = [scr] + [s for s in screens if s is not scr]
+        out = []
+        for s in screens:
+            try:
+                c = _ClickCatcher(s)
+                c.clicked.connect(self._on_catcher_click)
+                c.show()
+                c.raise_()
+                out.append(c)
+            except Exception:
+                _menu_err("слой клика вне меню")
+        self._catchers = out
+
+    def _hide_catchers(self) -> None:
+        for c in (getattr(self, "_catchers", None) or []):
+            try:
+                c.hide()
+                c.deleteLater()
+            except Exception:
+                pass
+        self._catchers = []
+
+    def _on_catcher_click(self) -> None:
+        """Клик мимо меню: закрываем меню (и подменю) с анимацией."""
+        try:
+            if self.sub_panel is not None:
+                self.sub_panel._finish()
+                self.sub_panel = None
+            self.start_out()
+        except Exception:
+            _menu_err("клик вне меню")
+
     def start_out(self) -> None:
         """Закрытие С АНИМАЦИЕЙ (260 мс, ease-in) вместо мгновенного hide()."""
         if self._phase in ("out", "done"):
             return
+        # слой клика снимаем СРАЗУ: пока идёт затухание, он не должен ловить
+        # нажатия (иначе второй клик «съедался» бы уже закрытым меню)
+        self._hide_catchers()
         if self.sub_panel is not None:
             self.sub_panel.start_out()
         self._phase = "out"
@@ -695,6 +805,7 @@ class PopupMenu(QtWidgets.QWidget if QT_OK else object):
         self._cancel_hover_open()
         self._cancel_hover_close()
         self._ticker.stop()
+        self._hide_catchers()
         self._finish_stats()
         if self.sub_panel is not None:
             self.sub_panel._ticker.stop()

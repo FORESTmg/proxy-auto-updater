@@ -35,7 +35,9 @@ license=('GPL-3.0-only')
 # xcb-util-keysyms — libxcb-keysyms.so.1, xcb-util-image — libxcb-image.so.0,
 # xcb-util-renderutil — libxcb-render-util.so.0, xcb-util-cursor —
 # libxcb-cursor.so.0, libxkbcommon-x11 — libxkbcommon-x11.so.0.
-depends=('curl'
+depends=('bash'
+         'curl'
+         'hicolor-icon-theme'
          'libxkbcommon-x11'
          'xcb-util-cursor'
          'xcb-util-wm'
@@ -43,14 +45,17 @@ depends=('curl'
          'xcb-util-keysyms'
          'xcb-util-renderutil'
          'libxcb')
+# bash — .install-скрипты PKGBUILD и /usr/bin/forest-clean-desktop (#!/bin/bash);
+# hicolor-icon-theme — значок ставится в /usr/share/icons/hicolor, без базовой
+# темы hicolor панель и меню приложений его не находят (это находил namcap).
 # libGL/libEGL нужны GL-интеграции xcb (Qt грузит их динамически): без драйвера
 # помощник рисует программно, но с ним — как на обычном рабочем столе.
 # ВАЖНО: без libglvnd/libEGL плагин xcb не загружается вовсе, Qt «недоступен»,
 # и помощник честно выходит с кодом 3 («Qt недоступен») — интерфейса не будет,
 # сама программа работает. Поэтому зависимость объявлена в optdepends.
-optdepends=('libglvnd: GL/EGL для GL-интеграции xcb (иначе помощник выйдет с кодом 3 «Qt недоступен» и значка в трее не будет)'
+optdepends=('libglvnd: GL/EGL для GL-интеграции xcb (иначе помощник выйдет с кодом 3 «Qt недоступен» и значка не будет)'
             'mesa: программный GL-драйвер (llvmpipe) для машин без видеодрайвера'
-            'plasma-workspace: панель KDE Plasma — для нашего плазмоида (значок в панели + меню)')
+            'xorg-xwayland: значок в стиле трея на Wayland-сеансе (своё X11-окно ставится по координатам; без Xwayland остаётся значок лотка, и правый клик по нему в Plasma открывает меню лотка)')
 install=forest-proxy-updater.install
 options=('!strip' '!emptydirs' '!debug')
 
@@ -76,15 +81,13 @@ source=('forest-proxy-updater'
         'forest-proxy-updater.desktop'
         'forest-proxy-updater-ui.desktop'
         'forest-proxy-updater.png'
-        'plasmoid-metadata.json'
-        'plasmoid-main.qml'
-        'plasmoid-read-state.sh')
+        'forest-clean-desktop')
 
 sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP'
             'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP'
             'SKIP' 'SKIP'
-            'SKIP' 'SKIP' 'SKIP' 'SKIP'
-            'SKIP' 'SKIP' 'SKIP')
+            'SKIP' 'SKIP' 'SKIP'
+            'SKIP')
 
 package() {
   # Программа: PyInstaller-onefile ELF, ядро xray и гео-базы внутри.
@@ -111,6 +114,10 @@ package() {
   install -Dm644 "$srcdir/INSTALL.ru.md" "$pkgdir/usr/share/doc/$pkgname/INSTALL.ru.md"
   install -Dm644 "$srcdir/PACKAGE-README.md" "$pkgdir/usr/share/doc/$pkgname/PACKAGE-README.md"
   install -Dm644 "$srcdir/copyright" "$pkgdir/usr/share/doc/$pkgname/copyright"
+  # COPYING — и в doc, и в licenses: первый путь ждут проверки матрицы и
+  # пользователь (D3 из отчёта пакетов 1.3.8 — в Arch-пакете его не было),
+  # второй — обычная практика Arch (licenses пакета).
+  install -Dm644 "$srcdir/COPYING" "$pkgdir/usr/share/doc/$pkgname/COPYING"
   install -Dm644 "$srcdir/TERMS.md" "$pkgdir/usr/share/doc/$pkgname/TERMS.md"
   install -Dm644 "$srcdir/TERMS.ru.md" "$pkgdir/usr/share/doc/$pkgname/TERMS.ru.md"
   install -Dm644 "$srcdir/COPYING" "$pkgdir/usr/share/licenses/$pkgname/COPYING"
@@ -122,7 +129,9 @@ package() {
   install -d "$pkgdir/usr/bin"
   ln -sf "/usr/lib/$pkgname/forest-ui" "$pkgdir/usr/bin/forest-ui"
 
-  # Ярлыки в меню приложений и значок (нужен и трею, и уведомлениям)
+  # Ярлыки в меню приложений и значок (нужен и значку, и уведомлениям).
+  # Ярлык ПОМОЩНИКА скрыт (NoDisplay=true): значок программы один, он
+  # поднимается сам при входе в сеанс — второго значка в меню быть не должно.
   install -Dm644 "$srcdir/forest-proxy-updater.desktop" \
       "$pkgdir/usr/share/applications/forest-proxy-updater.desktop"
   install -Dm644 "$srcdir/forest-proxy-updater-ui.desktop" \
@@ -130,12 +139,21 @@ package() {
   install -Dm644 "$srcdir/forest-proxy-updater.png" \
       "$pkgdir/usr/share/icons/hicolor/256x256/apps/forest-proxy-updater.png"
 
-  # Плазмоид KDE: настоящая иконка в панели Plasma, по клику — НАШЕ меню
-  # (forest-ui --menu-popup). Раскладка KPackage: metadata.json + contents/.
-  install -Dm644 "$srcdir/plasmoid-metadata.json" \
-      "$pkgdir/usr/share/plasma/plasmoids/org.forest.proxyupdater/metadata.json"
-  install -Dm644 "$srcdir/plasmoid-main.qml" \
-      "$pkgdir/usr/share/plasma/plasmoids/org.forest.proxyupdater/contents/ui/main.qml"
-  install -Dm755 "$srcdir/plasmoid-read-state.sh" \
-      "$pkgdir/usr/share/plasma/plasmoids/org.forest.proxyupdater/contents/code/read-state.sh"
+  # АВТОЗАПУСКА у значка нет: его поднимает САМА программа в сеансе
+  # пользователя (watch.py -> ui_helper.ensure -> запуск от имени пользователя
+  # сеанса с его DISPLAY/WAYLAND_DISPLAY). Так значок появляется и при запуске
+  # программы, и при входе в сеанс — и он ОДИН (второго ярлыка в меню нет).
+
+  # Уборка панели от СТАРОГО способа (виджет-плазмоид + закреплённый ярлык).
+  # Запускается от пользователя: root не нужен, конфиг панели его.
+  install -Dm755 "$srcdir/forest-clean-desktop" \
+      "$pkgdir/usr/lib/$pkgname/forest-clean-desktop"
+  install -d "$pkgdir/usr/bin"
+  ln -sf "/usr/lib/$pkgname/forest-clean-desktop" \
+      "$pkgdir/usr/bin/forest-clean-desktop"
+
+  # ПЛАЗМОИДА В ПАКЕТЕ НЕТ: правый клик по виджету панели Plasma всегда забирает
+  # панель («Настроить виджет / Режим редактирования / Удалить виджет»), и
+  # никакой плазмоид этого не обойдёт. Значок — своё окно программы в стиле
+  # трея (src/tray_popup.py). Остатки старой установки снимает .install.
 }

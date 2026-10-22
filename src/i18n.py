@@ -233,6 +233,14 @@ _STRINGS = {
     "tray.menu.watchdog": {"ru": "Поднимать программу автоматически",
                            "en": "Bring the program up automatically"},
     "tray.menu.notify": {"ru": "Уведомления", "en": "Notifications"},
+    "tray.menu.tray_sni": {"ru": "Значок в области уведомлений",
+                           "en": "Notification-area icon"},
+    "tray.msg.mode_sni": {"ru": "значок перенесён в область уведомлений "
+                               "(меню рисует панель)",
+                          "en": "icon moved to the notification area "
+                                "(the panel draws the menu)"},
+    "tray.msg.mode_own": {"ru": "свой значок у края панели (наше меню)",
+                          "en": "own icon at the panel edge (our menu)"},
     "tray.menu.open_status": {"ru": "Открыть статус", "en": "Open status"},
     "tray.menu.theme": {"ru": "Тема оформления", "en": "Colour theme"},
     "theme.light": {"ru": "светлая", "en": "light"},

@@ -12,6 +12,9 @@
 # (скачается сам, ~15 МБ, если не указан FOREST_APPIMAGETOOL; интернет нужен
 # только для этого). FUSE не требуется: и сборка, и проверка идут через
 # --appimage-extract-and-run.
+# Сборщик использует ${BASH_SOURCE}: под sh (в Debian/Ubuntu это dash) будет
+# «Bad substitution», поэтому перезапускаем себя под bash.
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 set -eu
 
 . "$(cd "$(dirname "$0")" && pwd)/lib/common.sh"

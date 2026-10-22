@@ -308,22 +308,26 @@ def _is_our_helper(pid: int, cfg: dict) -> bool:
 def running_pid(cfg: dict) -> int:
     """pid работающего помощника (0 — не работает).
 
-    Смотрим на пульс (``state/ui_helper.json``) И на живой процесс: одного
-    пульса мало — файл мог остаться от упавшего помощника.
+    Смотрим на пульс И на живой процесс: одного пульса мало — файл мог остаться
+    от упавшего помощника. Пульс ищем и в каталоге состояния (помощник поднят
+    службой), и в сеансовых каталогах ``/run/user/<uid>/`` (помощник поднят в
+    сеансе пользователя и писать в системный каталог не может — см. ui_cmd).
     """
     try:
-        import ui_cmd as UC
-        p = UC.ping_path(cfg)
-        if not p or not os.path.isfile(p):
-            return 0
         import json
-        with open(p, encoding="utf-8") as f:
-            d = json.load(f)
-        pid = int(d.get("pid", 0) or 0)
-        if pid == os.getpid():
-            return 0
-        if _pid_alive(pid) and _is_our_helper(pid, cfg):
-            return pid
+        import ui_cmd as UC
+        paths = [UC.ping_path(cfg)]
+        paths += [os.path.join(d, UC.PING_FILE) for d in UC.session_candidates()]
+        for p in paths:
+            if not p or not os.path.isfile(p):
+                continue
+            with open(p, encoding="utf-8") as f:
+                d = json.load(f)
+            pid = int(d.get("pid", 0) or 0)
+            if pid == os.getpid():
+                continue
+            if _pid_alive(pid) and _is_our_helper(pid, cfg):
+                return pid
     except Exception:
         return 0
     return 0
@@ -338,6 +342,40 @@ def running(cfg: dict) -> bool:
     return running_pid(cfg) > 0
 
 
+def session_launch(cfg: dict) -> tuple:
+    """Как запустить GUI-помощник в графическом сеансе. -> (prefix, env, reason).
+
+    Служба работает от root и ВНЕ сеанса пользователя: без ``DISPLAY`` /
+    ``WAYLAND_DISPLAY`` помощник честно выходит («нет графической сессии»), и
+    значка не появляется. Поэтому помощник поднимается ОТ ИМЕНИ ПОЛЬЗОВАТЕЛЯ
+    СЕАНСА и с его окружением (``desktop_env.find_graphical_session``).
+
+    Пути состояния берём ОТ СЛУЖБЫ (``XDG_STATE_HOME`` и т. п.): значок должен
+    показывать то же состояние, что и супервизор, иначе он покажет «нет данных».
+    Пишет помощник туда, где ему РАЗРЕШЕНО (см. ``ui_cmd.out_dir``): команды
+    меню уходят в сеансовый канал, который супервизор читает из /run/user/*.
+    """
+    try:
+        import desktop_env as DE
+        sess = DE.find_graphical_session()
+    except Exception as e:                              # noqa: BLE001
+        return [], None, f"нет desktop_env: {e}"
+    if not sess.get("ok"):
+        return [], None, str(sess.get("reason") or "графического сеанса нет")
+    env = dict(os.environ)
+    for k, v in (sess.get("env") or {}).items():
+        if v:
+            env[k] = v
+    for k in ("FOREST_ROOT", "FOREST_CONFIG", "XDG_STATE_HOME", "XDG_DATA_HOME"):
+        if os.environ.get(k):
+            env[k] = os.environ[k]
+    sd = ((cfg or {}).get("paths") or {}).get("state_dir") or ""
+    if sd and not env.get("XDG_STATE_HOME") \
+            and os.path.basename(sd.rstrip("/")) == "forest-proxy-updater":
+        env["XDG_STATE_HOME"] = os.path.dirname(sd.rstrip("/"))
+    return list(sess.get("prefix") or []), env, ""
+
+
 def launch(cfg: dict, log_msg: bool = True) -> bool:
     """Запускает помощник отвязанно. -> True, если процесс стартовал."""
     if we_are_helper():
@@ -346,10 +384,24 @@ def launch(cfg: dict, log_msg: bool = True) -> bool:
     cmd = command(cfg)
     if not cmd:
         return False
+    prefix, env = [], None
+    if not IS_WIN:
+        prefix, env, why = session_launch(cfg)
+        if env is None:
+            # Без графического сеанса помощнику негде показать значок: он сам
+            # вышел бы с «нет графической сессии». Не плодим процессы.
+            if log_msg:
+                _info(f"помощник интерфейса: {why} — значок не поднимаю")
+            return False
+        cmd = list(prefix) + list(cmd)
     try:
         cwd = os.path.dirname(os.path.abspath(cmd[0]))
     except Exception:
         cwd = None
+    if prefix:
+        # от имени пользователя сеанса каталог программы читается, но рабочим
+        # каталогом лучше взять его домашний: помощник пишет журнал и в HOME
+        cwd = env.get("HOME") or cwd
     flags = 0
     if IS_WIN:
         # своя группа процессов + не наследовать консоль и задания вызывающего:
@@ -361,7 +413,8 @@ def launch(cfg: dict, log_msg: bool = True) -> bool:
     except Exception:
         devnull = None
     try:
-        p = subprocess.Popen(cmd, cwd=cwd or None, stdin=subprocess.DEVNULL,
+        p = subprocess.Popen(cmd, cwd=cwd or None, env=env,
+                             stdin=subprocess.DEVNULL,
                              stdout=devnull or subprocess.DEVNULL,
                              stderr=subprocess.STDOUT if devnull else subprocess.DEVNULL,
                              close_fds=True, creationflags=flags,

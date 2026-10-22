@@ -63,6 +63,13 @@ BAR_MT = 2
 BAR_H = 3
 FOOT_MT = 7
 FONT = {"t1": 15, "t2": 12, "step": 12, "ms": 12, "foot": 11}
+# Отступы карточки от края РАБОЧЕЙ ОБЛАСТИ (availableGeometry — уже без панели).
+# Макет: .toast{right:0;bottom:14px} внутри зоны рабочего стола шириной 400 px
+# при карточке 392 px, то есть 8 px справа и 14 px снизу до края области.
+CARD_MARGIN_R = 8
+CARD_MARGIN_B = 14
+CARD_MARGIN_L = 12              # для углов слева (corner=bottom-left/top-left)
+CARD_MARGIN_T = 12
 
 # Меню (docs/menu-mockup.html): строка = квадрат значка карточки, поэтому
 ROW_H = ICON                   # --row 34 px (высота строки = значок карточки)

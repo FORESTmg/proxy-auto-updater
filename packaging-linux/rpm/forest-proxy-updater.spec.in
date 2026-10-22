@@ -85,11 +85,16 @@ cp -a %{_sourcedir}/payload/. %{buildroot}/
 /usr/bin/forest-proxy-updater
 /usr/lib/forest-proxy-updater/forest-ui
 /usr/bin/forest-ui
+# Уборка панели от старого способа показа значка (виджет-плазмоид и закреплённый
+# ярлык). Запускается от пользователя, root не нужен.
+/usr/lib/forest-proxy-updater/forest-clean-desktop
+/usr/bin/forest-clean-desktop
 /usr/share/applications/forest-proxy-updater.desktop
 /usr/share/applications/forest-proxy-updater-ui.desktop
 /usr/share/icons/hicolor/256x256/apps/forest-proxy-updater.png
-# Плазмоид KDE (значок в панели Plasma + наше меню)
-/usr/share/plasma/plasmoids/org.forest.proxyupdater
+# Плазмоида в пакете БОЛЬШЕ НЕТ (правый клик по виджету панели забирает панель),
+# и служебного ярлыка меню-попапа тоже — перечислять их в %files нельзя:
+# rpmbuild падает с «File not found» ещё до записи пакета.
 /usr/lib/systemd/system/forest-proxy-updater.service
 /usr/lib/systemd/system/forest-proxy-updater-refresh.service
 /usr/lib/systemd/system/forest-proxy-updater.timer
@@ -105,13 +110,80 @@ cp -a %{_sourcedir}/payload/. %{buildroot}/
 /usr/share/licenses/forest-proxy-updater/COPYING
 
 %post
+# ── ЧЕСТНАЯ ОСТАНОВКА СТАРОГО ЗНАЧКА ─────────────────────────────────────────
+# upgrade НЕ снимает процессы прежней версии, а `forest-ui --stop` пишет флаг в
+# каталог состояния ТОГО, кто его вызвал: у службы он другой, и флага она не
+# видит (на живой машине 1.3.5 так остались ТРИ копии помощника и три значка).
+# Здесь процесс снимается по ФАКТУ: pkill -f по ПОЛНОМУ пути (у копий разные
+# аргументы, поэтому -x по имени не подходит), ожидание завершения и, если
+# процесс не ушёл, SIGKILL. Дополнительно — проход по /proc по факту
+# исполняемого файла: так снимаются копии, запущенные не из /usr/lib.
+# Та же логика, что в packaging-linux/deb/postinst и arch/*.install.
+_forest_ui_pids() {
+    for d in /proc/[0-9]*; do
+        exe=$(readlink "$d/exe" 2>/dev/null) || continue
+        # Пакет уже заменил файл на новый (rpm распаковывает ДО %post), и ядро
+        # показывает старый inode как «.../forest-ui (deleted)». Без этой строки
+        # проход по /proc не находил ни одной живой копии — ровно в том
+        # сценарии обновления, ради которого он и написан.
+        exe=${exe% (deleted)}
+        case "$exe" in
+            */forest-ui|*/forest-ui.exe) echo "${d#/proc/}" ;;
+        esac
+    done
+}
+
+_forest_stop_old_ui() {
+    pat='/usr/lib/forest-proxy-updater/forest-ui'
+    before=$(_forest_ui_pids | tr '\n' ' ')
+    # 1) по полному пути в командной строке — основной способ
+    if command -v pgrep >/dev/null 2>&1; then
+        if pgrep -f "$pat" >/dev/null 2>&1; then
+            pkill -TERM -f "$pat" >/dev/null 2>&1 || true
+        fi
+    fi
+    # 2) по факту исполняемого файла — копии с другим путём и аргументами
+    for pid in $(_forest_ui_pids); do
+        kill -TERM "$pid" 2>/dev/null || true
+    done
+    # 3) ждём до 6 с, затем SIGKILL тем, кто не ушёл
+    i=0
+    while [ "$i" -lt 60 ] && [ -n "$(_forest_ui_pids)" ]; do
+        sleep 0.1
+        i=$((i + 1))
+    done
+    if [ -n "$(_forest_ui_pids)" ]; then
+        if command -v pkill >/dev/null 2>&1; then
+            pkill -KILL -f "$pat" >/dev/null 2>&1 || true
+        fi
+        for pid in $(_forest_ui_pids); do
+            kill -KILL "$pid" 2>/dev/null || true
+        done
+        sleep 0.3
+    fi
+    left=$(_forest_ui_pids | tr '\n' ' ')
+    if [ -n "$before" ]; then
+        echo "forest-proxy-updater: старый значок остановлен (было pid: $before; осталось: ${left:-нет})"
+    else
+        echo "forest-proxy-updater: старый значок не был запущен"
+    fi
+    rm -f /var/lib/forest-proxy-updater/state/forest-proxy-updater/ui_stop.flag 2>/dev/null || true
+}
+
 # Каталог состояния нужен и вне systemd (ручные запуски).
 mkdir -p /var/lib/forest-proxy-updater
 chmod 0755 /var/lib/forest-proxy-updater
+# ДО запуска службы: снять ВСЕ живые копии помощника (иначе новая поднимется
+# рядом со старой, и значков станет больше, а не один).
+_forest_stop_old_ui
 if [ -d /run/systemd/system ]; then
   systemctl daemon-reload >/dev/null 2>&1 || true
   if systemctl enable --now forest-proxy-updater.service >/dev/null 2>&1; then
-    echo "forest-proxy-updater: служба включена и запущена"
+    # ОБНОВЛЕНИЕ ИДУЩЕЙ СЛУЖБЫ: enable --now не перезапускает уже работающий
+    # юнит, поэтому после установки продолжал бы работать СТАРЫЙ код (до
+    # перезагрузки). Явный restart обязателен.
+    systemctl restart forest-proxy-updater.service >/dev/null 2>&1 || true
+    echo "forest-proxy-updater: служба включена и запущена (код обновлён)"
   else
     echo "forest-proxy-updater: службу запустить не удалось, смотрите:"
     echo "  journalctl -u forest-proxy-updater.service -n 50 --no-pager"

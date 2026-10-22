@@ -280,6 +280,18 @@ class TrayActions:
         self.lg.warn("меню трея: тема = %s" % name)
         return I.tr(f"theme.msg.{name}")
 
+    def set_tray_mode(self, sni: bool) -> bool:
+        """Запоминает режим значка: ``True`` — SNI (область уведомлений).
+
+        Ключ ``ui.tray_mode``: "sni" | "own". Пишется тем же атомарным путём,
+        что и остальные настройки из меню, поэтому после перезапуска значок
+        поднимается в выбранном режиме.
+        """
+        mode = "sni" if sni else "own"
+        ok = bool(self._set_config(["ui", "tray_mode"], mode))
+        self.lg.warn(f"меню трея: режим значка = {mode} (записан: {ok})")
+        return ok
+
     def set_notify(self, on: bool) -> str:
         """Включает/выключает уведомления по конкретному значению (не «наоборот»)."""
         on = bool(on)

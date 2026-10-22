@@ -20,7 +20,7 @@ REPO_DIR="$(dirname "$PACKAGING_LINUX_DIR")"
 
 # ── версия и имена ──────────────────────────────────────────────────────────
 APP=forest-proxy-updater
-VERSION="${FOREST_PKG_VERSION:-1.3.2}"
+VERSION="${FOREST_PKG_VERSION:-1.3.10}"
 RELEASE="${FOREST_PKG_RELEASE:-1}"          # номер выпуска пакета (.rpm/.pkg)
 SUMMARY="Auto-updating proxy supervisor built on top of the Xray core"
 HOMEPAGE="https://github.com/FORESTmg/proxy-auto-updater"
@@ -45,13 +45,15 @@ UI_ELF="${FOREST_UI_ELF:-$REPO_DIR/linux/dist/$UI_NAME}"
 ICON_PNG="$PACKAGING_LINUX_DIR/icons/$APP.png"
 DESKTOP_SRC="$PACKAGING_LINUX_DIR/system/$APP.desktop"
 DESKTOP_UI_SRC="$PACKAGING_LINUX_DIR/system/$APP-ui.desktop"
-# Плазмоид KDE: настоящая иконка в панели Plasma, открывает НАШЕ меню
-# (панель KDE забирает правый клик по значку StatusNotifier, поэтому своё окно
-# там показать нечем — см. plasma/plasmoid/.../contents/ui/main.qml).
-# Он едет В ТОМ ЖЕ пакете: отдельный пакет плодил бы лишнюю установку.
-PLASMOID_ID="org.forest.proxyupdater"
-PLASMOID_SRC="$REPO_DIR/plasma/plasmoid/$PLASMOID_ID"
-PLASMOID_DEST="$PREFIX/share/plasma/plasmoids/$PLASMOID_ID"
+# Плазмоида в пакете БОЛЬШЕ НЕТ: правый клик по виджету панели всегда забирает
+# панель, поэтому значок — своё окно программы в стиле трея (src/tray_popup.py).
+# Значок поднимает САМА программа в сеансе пользователя (watch.py -> ui_helper.
+# ensure -> запуск от имени пользователя сеанса с его DISPLAY/WAYLAND_DISPLAY),
+# поэтому отдельного автозапуска у него нет — и второго значка тоже.
+# Скрипт для пользователя: убрать из панели остатки старого способа
+# (виджет-плазмоид и закреплённый ярлык). Root не нужен.
+CLEAN_SRC="$PACKAGING_LINUX_DIR/scripts/forest-clean-desktop.sh"
+CLEAN_NAME="forest-clean-desktop"
 UNIT_SRC_DIR="$PACKAGING_LINUX_DIR/system"
 EXAMPLE_CONFIG="$REPO_DIR/config.example.json"
 LICENSE_FILE="$REPO_DIR/LICENSE"
@@ -83,7 +85,42 @@ require_ui() {
   Соберите его: sh packaging/build-ui.sh"
 }
 
+# Переводы строк: скрипты пакета исполняются в Linux, и CR в них ломает
+# `curl … | bash` («$'\\r': command not found»), .install и postinst.
+# Причина появления — Windows-чекаут с core.autocrlf=true; лечится
+# .gitattributes (eol=lf) + `git config core.autocrlf false`. Здесь сборка
+# ОСТАНАВЛИВАЕТСЯ, чтобы CR не уехал в пакет незамеченным.
+check_line_endings() {
+    _bad=0
+    for _f in "$REPO_DIR/linux/install.sh" \
+              "$PACKAGING_LINUX_DIR/tar/install.sh" \
+              "$PACKAGING_LINUX_DIR/tar/uninstall.sh" \
+              "$PACKAGING_LINUX_DIR/deb/postinst" \
+              "$PACKAGING_LINUX_DIR/deb/prerm" \
+              "$PACKAGING_LINUX_DIR/deb/postrm" \
+              "$PACKAGING_LINUX_DIR/arch/$APP.install" \
+              "$PACKAGING_LINUX_DIR/scripts/$CLEAN_NAME.sh" \
+              "$PACKAGING_LINUX_DIR"/*.sh \
+              "$PACKAGING_LINUX_DIR"/lib/*.sh \
+              "$PACKAGING_LINUX_DIR"/system/*.desktop \
+              "$PACKAGING_LINUX_DIR"/appimage/*.desktop \
+              "$PACKAGING_LINUX_DIR"/rpm/*.spec.in \
+              "$PACKAGING_LINUX_DIR"/arch/PKGBUILD; do
+        [ -f "$_f" ] || continue
+        if LC_ALL=C grep -q $'\r' "$_f" 2>/dev/null; then
+            warn "CR (CRLF) в файле пакета: ${_f#"$REPO_DIR/"}"
+            _bad=1
+        fi
+    done
+    if [ "$_bad" != 0 ]; then
+        die "в файлах, которые уходят в пакет, есть CR — такую установку
+  сломает `curl … | bash`. Починить: sh packaging-linux/check-eol.sh --fix"
+    fi
+    say "переводы строк: LF во всех скриптах и ярлыках пакета"
+}
+
 check_inputs() {
+    check_line_endings
     [ -f "$ELF" ] || die "нет собранного ELF: $ELF
   Соберите Linux-версию: sh packaging/build-linux.sh"
     [ -x "$ELF" ] || warn "ELF без бита исполняемости: $ELF"
@@ -150,21 +187,15 @@ stage_payload() {
             "$DESKTOP_UI_SRC" > "$root$PREFIX/share/applications/$APP-ui.desktop"
         chmod 0644 "$root$PREFIX/share/applications/$APP-ui.desktop"
     fi
+    # Служебный ярлык меню-попапа больше НЕ ставим: он был нужен плазмоиду,
+    # а плазмоида в пакете нет (правый клик по виджету панели забирает панель).
 
-    # 2в. плазмоид KDE: иконка в панели Plasma + НАШЕ меню по клику.
-    #     Раскладка ровно та, которую ждёт KPackage: metadata.json +
-    #     contents/ui/main.qml + contents/code/read-state.sh.
-    if [ -d "$PLASMOID_SRC" ]; then
-        install -d "$root$PLASMOID_DEST/contents/ui" "$root$PLASMOID_DEST/contents/code"
-        install -m 0644 "$PLASMOID_SRC/metadata.json" \
-            "$root$PLASMOID_DEST/metadata.json"
-        install -m 0644 "$PLASMOID_SRC/contents/ui/main.qml" \
-            "$root$PLASMOID_DEST/contents/ui/main.qml"
-        install -m 0755 "$PLASMOID_SRC/contents/code/read-state.sh" \
-            "$root$PLASMOID_DEST/contents/code/read-state.sh"
-        say "плазмоид KDE: $PLASMOID_DEST"
-    else
-        warn "нет $PLASMOID_SRC — пакет будет без значка в панели KDE"
+    # 2в. скрипт для пользователя: убрать из панели остатки старого способа
+    #     (виджет-плазмоид и закреплённый ярлык помощника).
+    if [ -f "$CLEAN_SRC" ]; then
+        install -m 0755 "$CLEAN_SRC" "$root$LIBDIR/$CLEAN_NAME"
+        ln -sf "$LIBDIR/$CLEAN_NAME" "$root$PREFIX/bin/$CLEAN_NAME"
+        say "уборка панели: $PREFIX/bin/$CLEAN_NAME"
     fi
 
     # 3. системные юниты (пути уже подставлены)

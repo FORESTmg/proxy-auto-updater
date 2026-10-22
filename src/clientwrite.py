@@ -1169,6 +1169,95 @@ def _write_core_pid(cfg: dict, pid):
         pass
 
 
+# ── ПОЧЕМУ ЯДРО НЕ СЛУШАЕТ ПОРТ: одна строка с ПРИЧИНОЙ ────────────────
+# В 1.3.5 и раньше в журнал и в карточку попадало только «серверы пула не
+# отвечают». По такой строке нельзя отличить отсутствующий бинарь ядра от
+# невалидного конфига, занятого порта и упавшего процесса — а именно это и
+# нужно знать, когда 10808 не открывается. Причина определяется по факту:
+# бинарь -> конфиг -> кто держит порт -> жив ли наш pid -> хвост журнала ядра.
+_LAST_CORE_REASON = ""
+
+
+def _set_core_reason(cfg: dict, reason: str) -> None:
+    """Запомнить причину (в модуль и в состояние — её видно в отчёте)."""
+    global _LAST_CORE_REASON
+    _LAST_CORE_REASON = str(reason or "")[:400]
+    try:
+        st = StateStore(cfg)
+        st.data["core_reason"] = _LAST_CORE_REASON
+        st.data["core_reason_ts"] = time.time()
+        st.save()
+    except Exception:
+        pass
+
+
+def last_core_reason() -> str:
+    """Причина последнего отказа ядра ('' — отказов не было)."""
+    return _LAST_CORE_REASON
+
+
+def _core_log_tail(cfg: dict, lines: int = 3) -> str:
+    """Хвост журнала ядра (forest_xray.log) — там xray пишет свою ошибку."""
+    try:
+        p = os.path.join(cfg["paths"]["state_dir"], CORE_LOG_NAME)
+        with open(p, encoding="utf-8", errors="replace") as f:
+            got = f.readlines()[-lines:]
+        return " | ".join(x.strip() for x in got if x.strip())[:300]
+    except Exception:
+        return ""
+
+
+def _core_exe(pid) -> str:
+    try:
+        if os.name == "nt":
+            return ""
+        return os.path.basename(os.readlink("/proc/%d/exe" % int(pid)))
+    except Exception:
+        return ""
+
+
+def core_diag(client: dict, cfg: dict, port: int = 0) -> str:
+    """ПОЧЕМУ клиентский порт не слушается — одной строкой, по проверкам.
+
+    Порядок проверок = порядок причин на живой машине: нет бинаря -> нет
+    конфига -> порт держит ЧУЖОЙ процесс -> наш процесс жив, но не слушает ->
+    наш процесс умер (тогда читается его собственный журнал).
+    """
+    port = int(port or client.get("socks_port", DEFAULT_SOCKS_PORT))
+    core = client.get("core") or ""
+    root = ((cfg.get("paths") or {}).get("root")
+            or (cfg.get("paths") or {}).get("state_dir") or "<каталог данных>")
+    if not core or not os.path.isfile(core):
+        return ("ядро xray не найдено (%s) — порт %d открывать некому: положите "
+                "xray в %s/bin/xray" % (core or "путь пуст", port, root))
+    cfg_path = client.get("cfg") or ""
+    if not cfg_path or not os.path.isfile(cfg_path):
+        return "конфиг ядра не записан (%s)" % (cfg_path or "путь пуст")
+    pid_file = _read_core_pid(cfg)
+    owner = None
+    try:
+        owner = _port_pid(port)
+    except Exception:
+        owner = None
+    if port_listening(port, timeout=0.3):
+        if owner and pid_file and int(owner) != int(pid_file):
+            return ("порт %d держит ЧУЖОЙ процесс pid=%s (%s), а наше ядро pid=%s"
+                    % (port, owner, _core_exe(owner) or "?", pid_file))
+        tail = _core_log_tail(cfg, 1)
+        return "порт %d слушается, но связь не проходит%s" % (
+            port, (" (журнал ядра: %s)" % tail) if tail else "")
+    if pid_file and _pid_alive(pid_file):
+        return ("наше ядро pid=%s живо, но порт %d не слушает (ядро не открыло "
+                "inbound: смотрите %s)" % (pid_file, port,
+                                           os.path.join(cfg["paths"]["state_dir"],
+                                                        CORE_LOG_NAME)))
+    tail = _core_log_tail(cfg, 3)
+    if tail:
+        return "ядро упало на старте: %s" % tail
+    return ("ядро не запущено: pid-файл %s отсутствует, порт %d закрыт (xray "
+            "запускается с конфигом %s)" % (core_pid_path(cfg), port, cfg_path))
+
+
 def stop_core(cfg: dict, why: str = "") -> None:
     """Останавливает НАШЕ ядро (по pid-файлу и по конфигу в командной строке).
 
@@ -1202,10 +1291,14 @@ def start_core(client: dict, cfg: dict) -> bool:
     core = client.get("core")
     cfg_path = client.get("cfg")
     if not core or not os.path.isfile(core):
-        lg.error("start_core: ядро xray не найдено")
+        _set_core_reason(cfg, "ядро xray не найдено: ни %s/bin/xray, ни /usr/bin/xray, "
+                              "ни в PATH — порт %s открывать некому"
+                         % (cfg["paths"]["state_dir"], client.get("socks_port")))
+        lg.error("start_core: " + _LAST_CORE_REASON)
         return False
     if not cfg_path or not os.path.isfile(cfg_path):
-        lg.error("start_core: конфиг ядра ещё не записан")
+        _set_core_reason(cfg, "конфиг ядра не записан: %s" % (cfg_path or "путь пуст"))
+        lg.error("start_core: " + _LAST_CORE_REASON)
         return False
     env = dict(os.environ)
     adir = geo_asset_dir(core, cfg)
@@ -1226,7 +1319,8 @@ def start_core(client: dict, cfg: dict) -> bool:
     dl = time.time() + 8.0
     while time.time() < dl:
         if p.poll() is not None:
-            lg.error("start_core: ядро упало сразу после старта (см. forest_xray.log)")
+            _set_core_reason(cfg, core_diag(client, cfg, port))
+            lg.error("start_core: " + _LAST_CORE_REASON)
             return False
         # мелкий шаг опроса: приём порта замечаем через ~10-20 мс, а не 100-300
         if port_listening(port, timeout=0.05):
@@ -1235,12 +1329,13 @@ def start_core(client: dict, cfg: dict) -> bool:
             # поднятым и не перезапускали его
             time.sleep(0.05)
             if p.poll() is not None:
-                lg.error("start_core: наш процесс ядра вышел сразу после запуска "
-                         "(порт занят другим процессом?) — см. forest_xray.log")
+                _set_core_reason(cfg, core_diag(client, cfg, port))
+                lg.error("start_core: " + _LAST_CORE_REASON)
                 return False
             return True
         time.sleep(0.01)
-    lg.warn(f"start_core: порт {port} не открылся за 8 с")
+    _set_core_reason(cfg, core_diag(client, cfg, port))
+    lg.warn("start_core: " + _LAST_CORE_REASON)
     return False
 
 
@@ -2482,6 +2577,16 @@ def ensure_balancer(client: dict, cfg: dict, n: int = 10,
         lg.warn("ensure_balancer: пул пуст")
         if not _link_ok(cfg, socks_port) and _emergency_restore(client, cfg, socks_port):
             return True
+        # ПРИЧИНА в состояние, даже когда ядро не трогали: «пул пуст» — это НЕ
+        # причина закрытого порта, а следствие. Без этой строки в отчёте
+        # оставалось `core_reason: пустой`, и по нему нельзя было понять, что
+        # порт закрыт потому, что запускать ядро было не с чем.
+        try:
+            _set_core_reason(cfg, core_diag(client, cfg, socks_port))
+            lg.error("ensure_balancer: порт %d не открыт — ПРИЧИНА: %s"
+                     % (socks_port, _LAST_CORE_REASON))
+        except Exception:
+            pass
         return False
     ensure_system_proxy(client, cfg)
     sig = _pool_sig(pool)
@@ -2550,8 +2655,11 @@ def ensure_balancer(client: dict, cfg: dict, n: int = 10,
         # мёртвый конфиг не должен уносить связь.
         ok_v, err_v = _validate_new_config(client["core"], conf, cfg)
         if not ok_v:
+            _set_core_reason(cfg, core_diag(client, cfg, socks_port)
+                             if not client.get("core") else
+                             "новый конфиг отвергнут ядром: %s" % err_v)
             lg.error(f"ensure_balancer: новый конфиг невалиден ({err_v}) — "
-                     "живое ядро НЕ трогаю")
+                     f"живое ядро НЕ трогаю. ПРИЧИНА: {_LAST_CORE_REASON}")
             return bool(link)
         if live and link and cand_sha == live_sha:
             lg.info("ensure_balancer: конфиг совпадает с работающим — "
@@ -2567,7 +2675,8 @@ def ensure_balancer(client: dict, cfg: dict, n: int = 10,
             return False
         ok_r, gap_ms, rtt_r = _restart_core_timed(client, cfg)
         if not ok_r:
-            lg.error("ensure_balancer: ядро не поднялось")
+            lg.error("ensure_balancer: ядро не поднялось. ПРИЧИНА: %s"
+                     % (last_core_reason() or "причина не определена"))
             return False
         restarted, rtt_restart = True, rtt_r
         st.data["balancer_cfg_sha"] = cand_sha
@@ -2782,6 +2891,14 @@ def guard_cycle(client: dict, cfg: dict, probe_timeout: float = 6.0) -> bool:
 
     if _emergency_restore(client, cfg, int(port)):
         return True
+    # ПОЧЕМУ не вышло — В СОСТОЯНИЕ, а не только в журнал: аварийный конфиг не
+    # поднялся, и в отчёте `core_reason` должен отвечать на «почему 10808
+    # закрыт» фактом (нет бинаря / нет конфига / порт держит чужой / ядро упало).
+    try:
+        _set_core_reason(cfg, core_diag(client, cfg, int(port)))
+        lg.error("Guard: ПРИЧИНА невосстановленной связи: %s" % _LAST_CORE_REASON)
+    except Exception:
+        pass
     lg.error("Guard: восстановить связь не удалось")
     return False
 

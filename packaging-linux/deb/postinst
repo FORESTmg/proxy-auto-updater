@@ -3,21 +3,95 @@
 # Copyright (C) 2026 FOREST
 # SPDX-License-Identifier: GPL-3.0-only
 #
-# Задача: создать каталог состояния, поднять системную службу и включить её в
-# автозапуск. Никаких вопросов пользователю и никаких диалогов.
+# Задача: снять живые копии помощника от прежней версии, создать каталог
+# состояния, поднять системную службу, включить её в автозапуск и ПЕРЕЗАПУСТИТЬ
+# уже работающую службу, чтобы работал новый код. Никаких вопросов и диалогов.
+#
+# Ровно та же логика, что в arch/forest-proxy-updater.install (post_install):
+# .deb, .rpm и Arch обязаны вести себя одинаково при установке поверх старой
+# версии.
 set -e
 
 APP=forest-proxy-updater
 STATE=/var/lib/$APP
 
+# ── ЧЕСТНАЯ ОСТАНОВКА СТАРОГО ЗНАЧКА ─────────────────────────────────────────
+# enable --now НЕ снимает процессы прежней версии, а `forest-ui --stop` пишет
+# флаг в каталог состояния ТОГО, кто его вызвал: у службы он другой, и флага она
+# не видит (на живой машине 1.3.5 так остались ТРИ копии помощника и три значка).
+# Здесь процесс снимается по ФАКТУ: pkill -f по ПОЛНОМУ пути (у копий разные
+# аргументы, поэтому -x по имени не подходит), ожидание завершения и, если
+# процесс не ушёл, SIGKILL. Дополнительно — проход по /proc по факту
+# исполняемого файла: так снимаются копии, запущенные не из /usr/lib.
+_forest_ui_pids() {
+    for d in /proc/[0-9]*; do
+        exe=$(readlink "$d/exe" 2>/dev/null) || continue
+        # Пакет уже заменил файл на новый (dpkg распаковывает ДО postinst), и
+        # ядро показывает старый inode как «.../forest-ui (deleted)». Без этой
+        # строки проход по /proc не находил ни одной живой копии — ровно в том
+        # сценарии обновления, ради которого он и написан.
+        exe=${exe% (deleted)}
+        case "$exe" in
+            */forest-ui|*/forest-ui.exe) echo "${d#/proc/}" ;;
+        esac
+    done
+}
+
+_forest_stop_old_ui() {
+    pat='/usr/lib/forest-proxy-updater/forest-ui'
+    before=$(_forest_ui_pids | tr '\n' ' ')
+    # 1) по полному пути в командной строке — основной способ
+    if command -v pgrep >/dev/null 2>&1; then
+        if pgrep -f "$pat" >/dev/null 2>&1; then
+            pkill -TERM -f "$pat" >/dev/null 2>&1 || true
+        fi
+    fi
+    # 2) по факту исполняемого файла — копии с другим путём и аргументами
+    for pid in $(_forest_ui_pids); do
+        kill -TERM "$pid" 2>/dev/null || true
+    done
+    # 3) ждём до 6 с, затем SIGKILL тем, кто не ушёл
+    i=0
+    while [ "$i" -lt 60 ] && [ -n "$(_forest_ui_pids)" ]; do
+        sleep 0.1
+        i=$((i + 1))
+    done
+    if [ -n "$(_forest_ui_pids)" ]; then
+        if command -v pkill >/dev/null 2>&1; then
+            pkill -KILL -f "$pat" >/dev/null 2>&1 || true
+        fi
+        for pid in $(_forest_ui_pids); do
+            kill -KILL "$pid" 2>/dev/null || true
+        done
+        sleep 0.3
+    fi
+    left=$(_forest_ui_pids | tr '\n' ' ')
+    if [ -n "$before" ]; then
+        echo "$APP: старый значок остановлен (было pid: $before; осталось: ${left:-нет})"
+    else
+        echo "$APP: старый значок не был запущен"
+    fi
+    # флаг остановки от прежних сборок больше не нужен
+    rm -f "$STATE/state/$APP/ui_stop.flag" 2>/dev/null || true
+}
+
 # 1. каталог состояния (нужен и вне systemd: при ручном запуске)
 mkdir -p "$STATE"
 chmod 0755 "$STATE"
 
-# 2. systemd: перечитать юниты и включить службу
+# 2. ДО запуска службы: снять ВСЕ живые копии помощника (иначе новая поднимется
+#    рядом со старой, и значков станет больше, а не один).
+_forest_stop_old_ui
+
+# 3. systemd: перечитать юниты, включить службу и ПЕРЕЗАПУСТИТЬ её
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload >/dev/null 2>&1 || true
     if systemctl enable --now "$APP.service" >/dev/null 2>&1; then
+        # ОБНОВЛЕНИЕ ИДУЩЕЙ СЛУЖБЫ: enable --now не перезапускает уже
+        # работающий юнит, поэтому после установки продолжал бы работать СТАРЫЙ
+        # код (до перезагрузки). Явный restart обязателен: помощник снят выше,
+        # новый поднимется уже новым супервизором.
+        systemctl restart "$APP.service" >/dev/null 2>&1 || true
         echo "$APP: служба включена и запущена (systemctl status $APP.service)"
     else
         echo "$APP: не удалось запустить службу — проверьте журнал:"

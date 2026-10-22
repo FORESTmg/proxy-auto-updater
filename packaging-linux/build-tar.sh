@@ -11,6 +11,9 @@
 # Внутри: самодостаточный ELF (Python, ядро xray и гео-базы внутри), install.sh /
 # uninstall.sh, шаблоны юнитов systemd, конфиг по умолчанию, документация,
 # лицензия GPL-3.0. Никаких зависимостей, кроме curl, и никакой сети при сборке.
+# Сборщик использует ${BASH_SOURCE}: под sh (в Debian/Ubuntu это dash) будет
+# «Bad substitution», поэтому перезапускаем себя под bash.
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 set -eu
 
 . "$(cd "$(dirname "$0")" && pwd)/lib/common.sh"

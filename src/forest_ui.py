@@ -102,6 +102,10 @@ if QT_OK:
 # сервера, noanswer — «сторож молчит», restoring — восстановление связи).
 STATE_KINDS = ("ok", "busy", "off", "error", "switch", "noanswer", "restoring",
                "down")
+# Период обновления индикации: состояние читаем заново и подсказку значка
+# обновляем САМИ, без единого клика (пользователь: «статус обновлялся только
+# после закрытия меню»). 2 с — компромисс между свежестью и нагрузкой.
+REFRESH_MS = 2000
 _TIP_KEYS = {"ok": "tray.tip.ok", "busy": "tray.tip.busy",
              "off": "tray.tip.off", "error": "tray.tip.error"}
 
@@ -319,6 +323,336 @@ TEST_ANCHOR = None             # крючок проверок: (x, y, w, h) —
                               # в заданном прямоугольнике (вне экрана), чтобы
                               # проверить анимацию, не показывая окно пользователю
 
+# ═════════════ ГДЕ СТОИТ КАРТОЧКА: ТЕ ЖЕ ФЛАГИ ОКНА, ЧТО У ЗНАЧКА ══════════
+# ПОЧЕМУ ТАК. В сеансе Wayland место окна выбирает КОМПОЗИТОР. Для окна типа
+# UTILITY (его даёт ``Qt.Tool``) KWin игнорирует и ``move()`` ДО показа, и
+# ``move()`` после него: карточка выезжала ПО ЦЕНТРУ экрана, хотя код просил
+# правый нижний угол. Значок решил ровно эту задачу (``src/tray_popup.py``):
+# окно NORMAL без рамки, поверх, без фокуса
+# (``Qt.Window | FramelessWindowHint | WindowStaysOnTopHint |
+# WindowDoesNotAcceptFocus`` + ``WA_TranslucentBackground``/
+# ``WA_ShowWithoutActivating``/``WA_NativeWindow`` + ``_NET_WM_STATE_SKIP_TASKBAR``)
+# И запуск в ПРОЦЕССЕ X11 (``QT_QPA_PLATFORM=xcb``, XWayland) — только там клиент
+# сам ставит координаты (проверено xprop: окно стоит в заданной точке).
+# Карточка идёт ТЕМ ЖЕ путём:
+#   * окно — с тем же набором флагов (:data:`TOAST_PRESET_DEFAULT`);
+#   * координаты — ``move()`` ДО ``show()`` и ПОВТОРНО из ``QTimer.singleShot(0)``
+#     после ``show()``: гонку с композитором так и выигрываем;
+#   * если процесс не X11 (Wayland-native), карточку рисует ДОЧЕРНИЙ процесс с
+#     ``QT_QPA_PLATFORM=xcb`` (:class:`_RemoteCard`): Wayland не даёт клиенту
+#     позицию ВООБЩЕ, поэтому «подвинуть окно» там нечем.
+# ЖИВОЙ KWIN (не WSL): оконный менеджер центрирует ЛЮБОЕ управляемое окно и
+# активирует его при показе. Ни ``Qt.Window``, ни ``Qt.Tool``/UTILITY не спасают:
+# в WSLg композитора нет, поэтому там карточка и вставала в угол, а на настоящем
+# KWin — по центру и с перехватом фокуса. Работает ровно тот приём, что у значка:
+# ОКОННЫЙ МЕНЕДЖЕР НЕ ДОЛЖЕН ВИДЕТЬ ОКНО. Это override-redirect
+# (``Qt.BypassWindowManagerHint``) — позицию ставит X, фокус некому забирать.
+TOAST_PRESET_DEFAULT = "override"
+# Отступы от края РАБОЧЕЙ ОБЛАСТИ — как в макете (см. ui_style.CARD_MARGIN_*).
+NT_MARGIN_R = US.CARD_MARGIN_R
+NT_MARGIN_B = US.CARD_MARGIN_B
+NT_MARGIN_L = US.CARD_MARGIN_L
+NT_MARGIN_T = US.CARD_MARGIN_T
+
+# Имя набора -> (флаги окна, атрибуты QWidget). Перебор нужен диагностике
+# (``--toast-sweep``/``FOREST_TOAST_FLAGS``): какие типы окна KWin ставит по
+# нашим координатам, выясняется СНИМКОМ ЭКРАНА, а не ответами Qt.
+# ВАЖНО: ``Qt.WA_X11NetWmWindowType*`` — атрибуты ``Qt.WidgetAttribute`` (на самом
+# ``Qt`` их в PySide6 нет), поэтому имена резолвятся :func:`toast_attr`.
+_TOAST_PRESETS = {
+    # ПО УМОЛЧАНИЮ: обычное окно без рамки, поверх, без фокуса — как у значка.
+    "window": (Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+               | Qt.WindowDoesNotAcceptFocus,
+               ("nofocus",)),
+    # То же без «не принимать фокус» (на случай капризов KWin).
+    "window_plain": (Qt.Window | Qt.FramelessWindowHint
+                     | Qt.WindowStaysOnTopHint, ()),
+    # Окно с ТИПОМ NOTIFICATION (_NET_WM_WINDOW_TYPE_NOTIFICATION).
+    "notification": (Qt.Window | Qt.FramelessWindowHint
+                     | Qt.WindowStaysOnTopHint
+                     | Qt.WindowDoesNotAcceptFocus, ("notification", "nofocus")),
+    # Тип UTILITY, но окно управляемое (в отличие от Qt.Tool).
+    "utility": (Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+                | Qt.WindowDoesNotAcceptFocus, ("utility", "nofocus")),
+    # Тип DOCK — так рисуются панели Plasma (без _NET_WM_STRUT ничего не
+    # резервирует, окно просто висит у края).
+    "dock": (Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint,
+             ("dock", "nofocus")),
+    # OVERRIDE-REDIRECT: оконный менеджер окно НЕ трогает (позицию ставит X,
+    # фокус забирать некому). В Qt это ``BypassWindowManagerHint``; отдельного
+    # WA_X11...Override нет. ЭТОТ НАБОР — ПО УМОЛЧАНИЮ: только он на живом KWin
+    # даёт наши координаты и не перехватывает фокус (проверено xprop у значка:
+    # _NET_WM_WINDOW_TYPE_OVERRIDE + _NET_WM_STATE=ABOVE,STAYS_ON_TOP,SKIP_TASKBAR,
+    # и KWin такое окно не центрирует и не активирует).
+    "override": (Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+                 | Qt.WindowDoesNotAcceptFocus | Qt.BypassWindowManagerHint,
+                 ("nofocus",)),
+    # Синоним override (прежнее имя набора).
+    "bypass": (Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+               | Qt.BypassWindowManagerHint, ()),
+    # UTILITY (``Qt.Tool``) — ИМЕННО ОН игнорируется KWin по позиции; набор
+    # оставлен, чтобы диагностика могла воспроизвести исходную проблему.
+    "tool": (Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+             | Qt.WindowDoesNotAcceptFocus, ()),
+    # Тип TOOLTIP / SPLASH / DIALOG — остальные варианты перебора.
+    "tooltip_type": (Qt.Window | Qt.FramelessWindowHint
+                     | Qt.WindowStaysOnTopHint
+                     | Qt.WindowDoesNotAcceptFocus, ("tooltip", "nofocus")),
+    "tooltip": (Qt.ToolTip | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+                | Qt.WindowDoesNotAcceptFocus, ()),
+    "splash": (Qt.SplashScreen | Qt.FramelessWindowHint
+               | Qt.WindowStaysOnTopHint
+               | Qt.WindowDoesNotAcceptFocus, ()),
+    "dialog": (Qt.Dialog | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+               | Qt.WindowDoesNotAcceptFocus, ()),
+}
+
+# Имя атрибута -> имя члена ``Qt.WidgetAttribute`` (тип окна на уровне X11).
+_TOAST_ATTRS = {
+    "notification": "WA_X11NetWmWindowTypeNotification",
+    "utility": "WA_X11NetWmWindowTypeUtility",
+    "dock": "WA_X11NetWmWindowTypeDock",
+    "tooltip": "WA_X11NetWmWindowTypeToolTip",
+    "dialog": "WA_X11NetWmWindowTypeDialog",
+    "nofocus": "WA_X11DoNotAcceptFocus",
+}
+
+
+def toast_attr(name: str):
+    """Атрибут QWidget по имени (``Qt.WidgetAttribute``, затем ``Qt``).
+
+    В PySide6 эти атрибуты живут на ``Qt.WidgetAttribute``, а не на ``Qt``:
+    ``getattr(Qt, "WA_X11NetWmWindowTypeDock")`` вернул бы None и атрибут молча
+    не поставился бы.
+    """
+    attr = _TOAST_ATTRS.get(name, "")
+    if not attr:
+        return None
+    try:
+        return getattr(Qt.WidgetAttribute, attr)
+    except Exception:
+        return getattr(Qt, attr, None)
+
+
+def toast_preset_name() -> str:
+    """Имя набора флагов карточки: ``FOREST_TOAST_FLAGS`` либо набор по умолчанию.
+
+    Переменная окружения нужна диагностике: перебрать варианты типа окна БЕЗ
+    пересборки пакета (``FOREST_TOAST_FLAGS=tooltip forest-ui --toast-live``).
+    Неизвестное имя — набор по умолчанию: карточка обязана появиться.
+    """
+    name = (os.environ.get("FOREST_TOAST_FLAGS") or "").strip().lower()
+    return name if name in _TOAST_PRESETS else TOAST_PRESET_DEFAULT
+
+
+def toast_window_flags(name: str = None) -> tuple:
+    """Флаги окна карточки -> (``Qt.WindowType``, кортеж имён атрибутов)."""
+    key = name or toast_preset_name()
+    return _TOAST_PRESETS.get(key, _TOAST_PRESETS[TOAST_PRESET_DEFAULT])
+
+
+def apply_toast_attrs(win, attrs) -> None:
+    """Включить атрибуты типа окна (``WA_X11NetWmWindowType*``) ДО показа."""
+    for a in attrs or ():
+        attr = toast_attr(a)
+        if attr is not None:
+            win.setAttribute(attr, True)
+
+
+_X11_ERR_HANDLERS = []       # держим ссылки: ctypes-колбэк иначе соберётся GC
+
+
+def _x11_set_user_time_zero(win_id) -> bool:
+    """``_NET_WM_USER_TIME=0`` у окна: «это окно не от действия пользователя».
+
+    KWin решает, активировать ли окно, в том числе по этому свойству: у нового
+    окна без ``_NET_WM_USER_TIME`` он ведёт себя как при «пользователь только что
+    кликнул». Ноль означает ровно обратное — забирать фокус незачем. Ошибка
+    любой ценой НЕ ломает показ карточки: возвращаем False и просто пишем строку.
+
+    Делается через libX11 (ctypes), а не через python-xlib: лишняя зависимость
+    в one-file сборке не тянется, а свойство ставится одним XChangeProperty.
+    """
+    if IS_WIN or not win_id:
+        return False
+    # Ставим свойство ТОЛЬКО там, где окно действительно X11-шное: у offscreen/
+    # minimal «winId» — не окно X, и XChangeProperty на нём убивает процесс
+    # (Xlib по умолчанию считает ошибку фатальной — проверено в WSL).
+    if card_platform() not in ("xcb", "x11"):
+        return False
+    try:
+        import ctypes
+        import ctypes.util
+        lib = ctypes.util.find_library("X11") or "libX11.so.6"
+        x11 = ctypes.CDLL(lib)
+        x11.XOpenDisplay.restype = ctypes.c_void_p
+        x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        x11.XInternAtom.restype = ctypes.c_ulong
+        x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+        x11.XChangeProperty.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+                                        ctypes.c_ulong, ctypes.c_ulong,
+                                        ctypes.c_int, ctypes.c_int,
+                                        ctypes.c_void_p, ctypes.c_int]
+        x11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        x11.XFlush.argtypes = [ctypes.c_void_p]
+        x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+        # X-ошибка не должна ронять карточку: свой обработчик на время вызова.
+        err_t = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+        handler = err_t(lambda d, e: 0)
+        _X11_ERR_HANDLERS.append(handler)
+        try:
+            x11.XSetErrorHandler.argtypes = [err_t]
+            x11.XSetErrorHandler.restype = ctypes.c_void_p
+            x11.XSetErrorHandler(handler)
+        except Exception:
+            pass
+        dpy = x11.XOpenDisplay(None)
+        if not dpy:
+            return False
+        atom = x11.XInternAtom(dpy, b"_NET_WM_USER_TIME", 0)
+        val = ctypes.c_ulong(0)
+        XA_CARDINAL, PROP_MODE_REPLACE = 6, 0
+        x11.XChangeProperty(dpy, ctypes.c_ulong(int(win_id)), atom, XA_CARDINAL,
+                            32, PROP_MODE_REPLACE, ctypes.byref(val), 1)
+        x11.XSync(dpy, 0)                 # ошибку доставляем под нашим обработчиком
+        x11.XCloseDisplay(dpy)
+        return True
+    except Exception:
+        return False
+
+
+def _x11_display():
+    """Свой X-дисплей -> (lib, dpy) либо (None, None). Только для xcb/x11."""
+    if IS_WIN or card_platform() not in ("xcb", "x11"):
+        return None, None
+    try:
+        import ctypes
+        import ctypes.util
+        lib = ctypes.util.find_library("X11") or "libX11.so.6"
+        x11 = ctypes.CDLL(lib)
+        x11.XOpenDisplay.restype = ctypes.c_void_p
+        x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+        dpy = x11.XOpenDisplay(None)
+        return (x11, dpy) if dpy else (None, None)
+    except Exception:
+        return None, None
+
+
+def x11_geometry(win_id: int) -> dict:
+    """ФАКТ состояния окна от X-сервера: место, размер, override-redirect.
+
+    Зачем это, если есть ``self.pos()``: ``pos()`` — ПРОСЬБА клиента, а не факт.
+    Под XWayland окно могло встать в центр экрана, пока Qt считает, что оно в
+    углу, — по ``pos()`` проверка «встала ли карточка» врала. И ``xwininfo`` в
+    живой системе может отсутствовать (на CachyOS его нет), поэтому координаты
+    берутся напрямую из XGetWindowAttributes: этот путь работает всегда, где
+    есть libX11.
+    """
+    out = {}
+    if not win_id:
+        return out
+    x11, dpy = _x11_display()
+    if not dpy:
+        return out
+    try:
+        import ctypes
+
+        class _XWinAttrs(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_int), ("y", ctypes.c_int),
+                        ("width", ctypes.c_int), ("height", ctypes.c_int),
+                        ("border_width", ctypes.c_int), ("depth", ctypes.c_int),
+                        ("visual", ctypes.c_void_p), ("root", ctypes.c_ulong),
+                        ("klass", ctypes.c_int), ("bit_gravity", ctypes.c_int),
+                        ("win_gravity", ctypes.c_int),
+                        ("backing_store", ctypes.c_int),
+                        ("backing_planes", ctypes.c_ulong),
+                        ("backing_pixel", ctypes.c_ulong),
+                        ("save_under", ctypes.c_int),
+                        ("colormap", ctypes.c_ulong),
+                        ("map_installed", ctypes.c_int),
+                        ("map_state", ctypes.c_int),
+                        ("all_event_masks", ctypes.c_long),
+                        ("your_event_mask", ctypes.c_long),
+                        ("do_not_propagate_mask", ctypes.c_long),
+                        ("override_redirect", ctypes.c_int),
+                        ("screen", ctypes.c_void_p)]
+
+        x11.XGetWindowAttributes.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+                                             ctypes.POINTER(_XWinAttrs)]
+        x11.XGetWindowAttributes.restype = ctypes.c_int
+        a = _XWinAttrs()
+        if x11.XGetWindowAttributes(dpy, ctypes.c_ulong(int(win_id)),
+                                    ctypes.byref(a)):
+            out = {"abs_x": int(a.x), "abs_y": int(a.y),
+                   "w": int(a.width), "h": int(a.height),
+                   "override_redirect": bool(a.override_redirect),
+                   "map_state": {0: "IsUnmapped", 1: "IsUnviewable",
+                                 2: "IsViewable"}.get(int(a.map_state),
+                                                      int(a.map_state))}
+    except Exception:
+        out = {}
+    finally:
+        try:
+            x11.XCloseDisplay(dpy)
+        except Exception:
+            pass
+    return out
+
+
+def x11_move(win_id: int, x: int, y: int) -> bool:
+    """Поставить окно ПРЯМО в X-сервере (XMoveWindow + XFlush)."""
+    if not win_id:
+        return False
+    x11, dpy = _x11_display()
+    if not dpy:
+        return False
+    ok = False
+    try:
+        import ctypes
+        x11.XMoveWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+                                    ctypes.c_int, ctypes.c_int]
+        x11.XFlush.argtypes = [ctypes.c_void_p]
+        x11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        x11.XMoveWindow(dpy, ctypes.c_ulong(int(win_id)), int(x), int(y))
+        x11.XSync(dpy, 0)
+        ok = True
+    except Exception:
+        ok = False
+    finally:
+        try:
+            x11.XCloseDisplay(dpy)
+        except Exception:
+            pass
+    return ok
+
+
+def card_platform() -> str:
+    """Платформа Qt, на которой живёт ЭТОТ процесс (``xcb``/``wayland``/...)."""
+    try:
+        return str(QtGui.QGuiApplication.platformName() or "").lower()
+    except Exception:
+        return ""
+
+
+def card_can_be_placed() -> bool:
+    """Может ли карточка В ЭТОМ процессе встать по координатам.
+
+    Да — Windows и X11/XWayland (``xcb``): клиент сам ставит окно. Нет — Wayland
+    (``wayland``) и оффскрин: там местом распоряжается композитор, поэтому
+    карточку рисует дочерний процесс X11 (:class:`_RemoteCard`).
+    """
+    if IS_WIN:
+        return True
+    if str(os.environ.get("FOREST_CARD_FORCE_REMOTE") or "").lower() in ("1", "true",
+                                                                       "yes"):
+        return False                   # крючок проверок: гнать карточку через X11
+    plat = card_platform()
+    if plat in ("xcb", "windows", "offscreen", "minimal", ""):
+        return True
+    return False
+
+
 # ── ОДНА КАРТОЧКА ДЛЯ ВСЕХ ПУТЕЙ ───────────────────────────────────────────
 # Реальные события, `--show` и пункт меню «Проверить уведомление» рисуют ОДНУ И
 # ТУ ЖЕ карточку состава макета: значок+метка, заголовок, подпись, БЛОК ЭТАПОВ
@@ -345,6 +679,14 @@ CARD_SHOT_DONE = "card_shot_result.json"
 # карточек (ok->error->busy->ok->off) — пользователь видел «пять уведомлений».
 # Демо-серия (флаг --show-all) гейт проходит явно, чтобы её можно было показать.
 CARD_COALESCE_MS = 2500.0
+# АНТИСПАМ: одна карточка НА ТИП СОБЫТИЯ не чаще раза в 60 с. Живой KWin показал
+# регрессию, которой не было в WSL: сторож при мёртвом пуле крутил «полный цикл»
+# каждые ~0.3 с, каждый цикл писал НОВЫЙ номер процесса — и помощник честно
+# выкатывал по карточке на каждый номер (в журнале ×191 за 60 с). Склейка
+# ``CARD_COALESCE_MS`` тут не спасает: это РАЗНЫЕ процессы. Теперь один и тот же
+# вид карточки (тип + заголовок + подпись) повторяется не чаще раза в 60 с, а
+# неудачи поиска серверов/пустой пул карточку не показывают ВООБЩЕ — только журнал.
+CARD_THROTTLE_S = 60.0
 # Дополнительные кадры движения на удержании: полоса времени «дожимает» уже
 # заполненную полосу бегущей искрой, чтобы движение было видно ВСЁ время показа.
 BAR_SHEEN_MS = 1100.0
@@ -782,6 +1124,28 @@ def _steps_total_ms(steps) -> int:
     return max([int(s.get("ms") or 0) for s in (steps or [])] or [0])
 
 
+# СЛУЖЕБНЫЙ ШУМ: неудачи ПОИСКА серверов и пустой пул — это не событие для
+# пользователя, а работа сторожа. Карточку по ним НЕ показываем вообще (только
+# журнал): иначе «программа ничего не находит» выглядит как поток уведомлений.
+# Проверка по тексту, потому что источники разные (сторож, цикл, команда меню).
+CARD_NOISE_WORDS = (
+    "поиск сервер", "поиск узл", "поиск новый", "поиск источн",
+    "пул пуст", "пул не собран", "нет серверов", "не найдено сервер",
+    "серверы не найдены", "узлы не найдены", "0 серверов", "ничего не найдено",
+    "no servers found", "empty pool", "pool is empty", "search failed",
+)
+
+
+def card_is_search_noise(kind: str, title: str, body: str = "", sub: str = "") -> bool:
+    """True — карточка про НЕУДАЧУ ПОИСКА/ПУСТОЙ ПУЛ: показывать не надо.
+
+    Успешные карточки (связь восстановлена, переключение) сюда не попадают:
+    ищем только явные слова о поиске и пустом пуле.
+    """
+    blob = " ".join(str(x or "") for x in (title, sub, body)).casefold()
+    return any(w in blob for w in CARD_NOISE_WORDS)
+
+
 class Toast(QtWidgets.QWidget):
     """Карточка уведомления — 1:1 с утверждённым макетом ``docs/notify-mockup.html``.
 
@@ -798,9 +1162,14 @@ class Toast(QtWidgets.QWidget):
     заголовок, подпись, дорожка полосы, футер) рисуется ОДИН раз в ``QPixmap``
     и подставляется целиком — Qt не перерисовывает части, мерцать нечему.
 
-    Фокус не перехватывается: ``Qt.Tool | Qt.WindowDoesNotAcceptFocus |
-    Qt.WindowTransparentForInput`` + ``WA_ShowWithoutActivating``; показ без
-    ``activateWindow()``.
+    Фокус не перехватывается: окно собрано ТЕМИ ЖЕ флагами, что у значка
+    (``Qt.Window | FramelessWindowHint | WindowStaysOnTopHint |
+    WindowDoesNotAcceptFocus`` + ``WA_ShowWithoutActivating``/
+    ``WA_TransparentForMouseEvents``/``WA_NativeWindow`` и
+    ``_NET_WM_STATE_SKIP_TASKBAR``), показ без ``activateWindow()``. Место —
+    правый нижний угол РАБОЧЕЙ ОБЛАСТИ (``availableGeometry`` — уже без панели):
+    ``move()`` ставится ДО ``show()`` и ПОВТОРНО после него, иначе композитор
+    XWayland возвращает окно туда, куда поставил сам (раньше — по центру).
     """
 
     def __init__(self, kind: str, title: str, body: str, cfg: dict,
@@ -808,9 +1177,9 @@ class Toast(QtWidgets.QWidget):
                  on_done=None, sub: str = "", pct=None, steps=None,
                  footer: str = "", spinner: bool = False, total_ms=None,
                  role: str = "restore"):
-        super().__init__(None,
-                         Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
-                         | Qt.WindowDoesNotAcceptFocus | Qt.WindowTransparentForInput)
+        _flags, _attrs = toast_window_flags()
+        super().__init__(None, _flags)
+        self.toast_preset = toast_preset_name()
         self.cfg = cfg
         self.kind = kind if kind in STATE_KINDS else "busy"
         self.role = role if role in ("restore", "switch") else "restore"
@@ -830,11 +1199,25 @@ class Toast(QtWidgets.QWidget):
                        for k in ("ok", "error", "busy", "off")}
         self._clr = {}                 # прогресс цвета подписи этапа (интерполяция)
         self.on_done = on_done
+        # Аттрибуты окна — как у значка (см. комментарий к TOAST_PRESET_DEFAULT).
+        # Клики по карточке проходят мимо (она только показывает), фокус не
+        # забирается, флаг X11-типа ставится ДО показа (иначе WM его не увидит).
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self.setAttribute(Qt.WA_NativeWindow, True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        apply_toast_attrs(self, _attrs)
         self.setWindowFlag(Qt.WindowDoesNotAcceptFocus, True)
         self.setFocusPolicy(Qt.NoFocus)
+        # Место карточки: home — правый нижний угол рабочей области, _slide_off —
+        # сдвиг анимации поверх него (если композитор move() слушает).
+        self._home = QtCore.QPoint(0, 0)
+        self._slide_off = 0
+        self._slide_ok = True
+        self._placed_ok = None         # True/False — встала ли карточка в угол
+        self._scr = None               # экран карточки (для отчёта)
+        self._frame_no = 0
         self.icon = icon_from_state(self.kind, cfg)
         # ОБА значка готовим заранее: в момент финала состояние меняется на ok,
         # и перерисовка значка «на лету» выбивала кадр из 60 к/с (замер WSL:
@@ -1298,17 +1681,153 @@ class Toast(QtWidgets.QWidget):
         card_shot_finish(self.cfg, res)
 
     # ── фазы ──
-    def show_toast(self) -> dict:
-        """Показывает карточку: ВХОД (340 мс) -> ХОД -> ФИНАЛ -> ВЫХОД (260 мс)."""
+    def _area(self):
+        """Рабочая область для карточки -> (QRect, QScreen).
+
+        ``availableGeometry()`` — это экран МИНУС панель, то есть ровно то место,
+        где карточка не заезжает на панель. Экран берётся тот, где курсор (как у
+        уведомлений Windows — монитор под курсором), иначе основной.
+        """
         if TEST_ANCHOR is not None:
-            area = QtCore.QRect(*TEST_ANCHOR)      # крючок проверок (вне экрана)
-        else:
-            scr = QtWidgets.QApplication.primaryScreen()
-            area = scr.availableGeometry() if scr else QtCore.QRect(0, 0, 800, 600)
-        m = 12
-        x = area.right() - self.width() - m
-        y = area.bottom() - self.height() - m
-        self._home = QtCore.QPoint(x, y)
+            return QtCore.QRect(*TEST_ANCHOR), None      # крючок проверок
+        scr = None
+        try:
+            scr = QtGui.QGuiApplication.screenAt(QtGui.QCursor.pos())
+        except Exception:
+            scr = None
+        if scr is None:
+            try:
+                scr = QtWidgets.QApplication.primaryScreen()
+            except Exception:
+                scr = None
+        area = (scr.availableGeometry() if scr is not None
+                else QtCore.QRect(0, 0, 800, 600))
+        return area, scr
+
+    def home_pos(self) -> QtCore.QPoint:
+        """Точка карточки в углу РАБОЧЕЙ ОБЛАСТИ (над панелью).
+
+        Отступы — из макета ``docs/notify-mockup.html`` (8 px справа, 14 px снизу
+        до края рабочей области). Угол — настройка ``notify.corner``.
+
+        D5 (1.3.9): все величины — ЛОГИЧЕСКИЕ пиксели, Qt сам умножает их на
+        ``devicePixelRatio`` (на 150 % отступ 14 логических = 21 устройство).
+        Ошибка была не в множителе, а в источнике прямоугольника: на XFCE при
+        150 % панель сообщает страту в УСТРОЙСТВЕ, Qt пересчитывает её в
+        логические и ПРИБАВЛЯЕТ к ``y`` — ``availableGeometry()`` выходила за
+        низ экрана (y=27, h=515 при экране 533), карточка вставала на 8
+        устройство-пикселей от края вместо 21. Поэтому итог ограничивается
+        ФАКТИЧЕСКИМ прямоугольником экрана — тоже в логических пикселях.
+        """
+        area, self._scr = self._area()
+        corner = "bottom-right"
+        try:
+            import notify as N
+            corner = str(N.settings(self.cfg).get("corner") or "bottom-right")
+        except Exception:
+            pass
+        w, h = self.width(), self.height()
+        x0 = (area.x() + area.width() - w - NT_MARGIN_R
+              if corner.endswith("right") else area.x() + NT_MARGIN_L)
+        y0 = (area.y() + area.height() - h - NT_MARGIN_B
+              if corner.startswith("bottom") else area.y() + NT_MARGIN_T)
+        # даже на крошечном экране карточка не уезжает за рабочую область
+        x = max(area.x(), min(int(x0), area.x() + area.width() - w))
+        y = max(area.y(), min(int(y0), area.y() + area.height() - h))
+        # …и за сам экран (D5): рабочая область может быть больше него
+        full = None
+        try:
+            full = self._scr.geometry() if self._scr is not None else None
+        except Exception:
+            full = None
+        if full is not None and full.width() > 0 and full.height() > 0:
+            m_r = NT_MARGIN_R if corner.endswith("right") else NT_MARGIN_L
+            m_b = NT_MARGIN_B if corner.startswith("bottom") else NT_MARGIN_T
+            x = min(max(int(x), full.x() + m_r),
+                    full.x() + full.width() - w - m_r)
+            y = min(max(int(y), full.y() + m_b),
+                    full.y() + full.height() - h - m_b)
+        return QtCore.QPoint(int(x), int(y))
+
+    def _apply_pos(self) -> None:
+        """Ставит окно в home + сдвиг анимации (если WM слушает ``move()``)."""
+        if not self._slide_ok:
+            return
+        self.move(self._home.x() + int(self._slide_off), self._home.y())
+
+    def _set_slide(self, off: float) -> None:
+        """Сдвиг анимации (вправо на ``off`` px) — поверх места карточки."""
+        self._slide_off = int(round(off))
+        self._apply_pos()
+
+    def _reassert_pos(self) -> None:
+        """ПОВТОРНАЯ постановка окна после ``show()``.
+
+        Композитор XWayland ставит окно по-своему в момент показа и делает это
+        уже после того, как Qt записал координаты, — поэтому одного ``move()``
+        мало. Эта функция вызывается из ``QTimer.singleShot(0)`` сразу после
+        ``show()`` и ещё раз чуть позже; пишет в журнал, если окно всё-таки
+        стоит не там (тогда позиция — не наша: композитор не подчиняется).
+        """
+        before = self.pos()
+        self._apply_pos()
+        want = QtCore.QPoint(self._home.x() + int(self._slide_off), self._home.y())
+        # ФАКТ от X-сервера, а не от Qt. Если X держит окно не там, где просит
+        # Qt (так KWin и ставит управляемое окно по центру), окно ставится
+        # ПРЯМО в X — XMoveWindow для override-redirect окна исполняет сам X,
+        # мимо оконного менеджера. Решение «встало/не встало» принимается по
+        # ответу XGetWindowAttributes.
+        wid = int(self.winId() or 0)
+        xg = x11_geometry(wid)
+        if xg and self._slide_off == 0 and (int(xg.get("abs_x", -1)),
+                                            int(xg.get("abs_y", -1))) != (want.x(),
+                                                                          want.y()):
+            if x11_move(wid, want.x(), want.y()):
+                xg = x11_geometry(wid) or xg
+        if xg:
+            self._stats["x11"] = xg
+        if xg and self._slide_off == 0:
+            at_home = (int(xg.get("abs_x", -1)) == want.x()
+                       and int(xg.get("abs_y", -1)) == want.y())
+            self._placed_ok = bool(at_home)
+            self._stats["placed"] = self._placed_ok
+            self._stats["home"] = [self._home.x(), self._home.y()]
+            self._stats["pos_after_show"] = [before.x(), before.y()]
+            if not at_home:
+                try:
+                    log.get_logger().warn(
+                        f"forest-ui: ПРИЧИНА не-в-углу: X держит окно в "
+                        f"{xg.get('abs_x')},{xg.get('abs_y')} вместо "
+                        f"{want.x()},{want.y()} (override_redirect="
+                        f"{xg.get('override_redirect')}, map_state="
+                        f"{xg.get('map_state')}, платформа {card_platform()}, "
+                        f"набор {self.toast_preset})")
+                except Exception:
+                    pass
+            return
+        if self.pos() != want:
+            self._placed_ok = False
+            try:
+                log.get_logger().warn(
+                    f"forest-ui: карточка стоит в {self.pos().x()},{self.pos().y()} "
+                    f"вместо {want.x()},{want.y()} — композитор игнорирует move() "
+                    f"(платформа {card_platform()}, набор {self.toast_preset})")
+            except Exception:
+                pass
+        elif self._slide_off == 0:
+            self._placed_ok = True
+        self._stats["placed"] = self._placed_ok
+        self._stats["home"] = [self._home.x(), self._home.y()]
+        self._stats["pos_after_show"] = [before.x(), before.y()]
+
+    def show_toast(self) -> dict:
+        """Показывает карточку: ВХОД (340 мс) -> ХОД -> ФИНАЛ -> ВЫХОД (260 мс).
+
+        Координаты ставятся ДО ``show()`` и ПОВТОРНО после него
+        (:meth:`_reassert_pos`): на XWayland композитор успевает поставить окно
+        сам, и второй ``move()`` — единственный способ вернуть его в угол.
+        """
+        self._home = self.home_pos()
         self._t0 = time.perf_counter()
         self._t_run = self._t0
         self._step_t0 = {}
@@ -1321,14 +1840,45 @@ class Toast(QtWidgets.QWidget):
         self._paint_ms = []
         self._slow = []
         self._dropped = 0
-        self.move(self._home.x() + SLIDE_PX, self._home.y())
+        self._frame_no = 0
+        self._slide_off = SLIDE_PX
+        self._apply_pos()                # ВАЖНО: ДО show() — координаты в X11
         self.setWindowOpacity(0.0)
         self.show()                      # без activateWindow(): фокус не трогаем
         self.raise_()
+        # ОКОННЫЙ МЕНЕДЖЕР НЕ ДОЛЖЕН ЗАБИРАТЬ ФОКУС: override-окну это и так
+        # не грозит (KWin его не видит), но если набор переопределён переменной
+        # ``FOREST_TOAST_FLAGS`` на управляемый — гасим признак «окно от
+        # действия пользователя». Ставится ПОСЛЕ show(), когда есть X-окно.
+        try:
+            ut = _x11_set_user_time_zero(int(self.winId()))
+            self._stats["user_time_zero"] = bool(ut)
+            if not ut and not IS_WIN:
+                log.get_logger().info(
+                    f"forest-ui: _NET_WM_USER_TIME не выставлен (набор "
+                    f"{self.toast_preset}, платформа {card_platform()})")
+        except Exception:
+            self._stats["user_time_zero"] = False
+        # ВАЖНО: после show() координаты ставим ЕЩЁ РАЗ (гонка с композитором).
+        # Второй заход — чуть позже: KWin может «доставить» своё место уже после
+        # первого кадра.
+        QtCore.QTimer.singleShot(0, self._reassert_pos)
+        QtCore.QTimer.singleShot(60, self._reassert_pos)
+        # окно-карточка не должно появляться кнопкой в панели задач (как значок).
+        # Только на настоящем X11: у offscreen/minimal winId — не окно X, и
+        # X-запрос к нему фатален для процесса (проверено в WSL).
+        if not IS_WIN and card_platform() in ("xcb", "x11"):
+            try:
+                import tray_popup as TP
+                TP.hide_from_taskbar(int(self.winId()))
+            except Exception:
+                pass
         self._last = 0.0
         self._next_due = time.perf_counter()
         self.phase = "in"
         self._stats["in_ms"] = float(ANIM_IN_MS)
+        self._stats["preset"] = self.toast_preset
+        self._stats["platform"] = card_platform()
         self._ticker.start()
         self.update()
         return self._stats
@@ -1355,14 +1905,57 @@ class Toast(QtWidgets.QWidget):
         if self.phase == "in":
             t = min(1.0, el / float(ANIM_IN_MS))
             e = bezier_y(t, *CB_IN)
-            self.move(self._home.x() + int(round(SLIDE_PX * (1.0 - e))),
-                      self._home.y())
+            self._set_slide(SLIDE_PX * (1.0 - e))
             self.setWindowOpacity(e)
             if t >= 1.0:
                 self._t0 = now
                 self._t_run = now
                 self._step_t0 = {}
                 self.phase = "hold" if self._final else "run"
+                # Вход закончен, сдвиг = 0: окно ОБЯЗАНО стоять в углу. Если
+                # X держит его иначе — сдвиг анимации отключаем, чтобы карточка
+                # не «дёргалась», и это видно в журнале. Судим по ФАКТУ из X
+                # (x11_geometry), а не по self.pos(): pos() — просьба Qt, и под
+                # XWayland она может расходиться с тем, что на экране.
+                wid_a = int(self.winId() or 0)
+                xa = x11_geometry(wid_a)
+                if xa and (int(xa.get("abs_x", -1)), int(xa.get("abs_y", -1))) \
+                        != (self._home.x(), self._home.y()) and self._slide_ok:
+                    if x11_move(wid_a, self._home.x(), self._home.y()):
+                        xa = x11_geometry(wid_a) or xa
+                if self._slide_ok and xa and (
+                        int(xa.get("abs_x", -1)) != self._home.x()
+                        or int(xa.get("abs_y", -1)) != self._home.y()):
+                    self._placed_ok = False
+                    self._slide_ok = False
+                    self._stats["placed"] = False
+                    self._stats["x11"] = xa
+                    try:
+                        log.get_logger().warn(
+                            f"forest-ui: ПРИЧИНА не-в-углу: X держит окно в "
+                            f"{xa.get('abs_x')},{xa.get('abs_y')} вместо "
+                            f"{self._home.x()},{self._home.y()} "
+                            f"(override_redirect={xa.get('override_redirect')}, "
+                            f"платформа {card_platform()}, "
+                            f"набор {self.toast_preset})")
+                    except Exception:
+                        pass
+                elif self._slide_ok and self.pos() != self._home and not xa:
+                    self._placed_ok = False
+                    self._slide_ok = False
+                    self._stats["placed"] = False
+                    try:
+                        log.get_logger().warn(
+                            f"forest-ui: карточка встала в "
+                            f"{self.pos().x()},{self.pos().y()} вместо "
+                            f"{self._home.x()},{self._home.y()} — move() не "
+                            f"подчиняется (платформа {card_platform()}, набор "
+                            f"{self.toast_preset})")
+                    except Exception:
+                        pass
+                else:
+                    self._placed_ok = True
+                    self._stats["placed"] = True
         elif self.phase == "run":
             if self.total_ms > 0:
                 self._p = max(self._p, min(1.0, ((now - self._t0) * 1000.0)
@@ -1379,12 +1972,20 @@ class Toast(QtWidgets.QWidget):
         elif self.phase == "out":
             t = min(1.0, el / float(ANIM_OUT_MS))
             e = bezier_y(t, *CB_OUT)
-            self.move(self._home.x() + int(round(SLIDE_PX * e)), self._home.y())
+            self._set_slide(SLIDE_PX * e)
             self.setWindowOpacity(max(0.0, 1.0 - e))
             if t >= 1.0:
                 self._done()
                 return
         g = self.geometry()
+        # МЕСТО ДОКРАШИВАЕТСЯ: если композитор сдвинул окно уже во время показа,
+        # возвращаем его в угол (раз в ~250 мс, а не каждым кадром — лишних
+        # move() в X-сервер не льём).
+        self._frame_no += 1
+        if (self._slide_ok and self.phase in ("hold", "run")
+                and self._frame_no % 15 == 0 and self.pos() != self._home):
+            self._apply_pos()
+            g = self.geometry()
         self.samples.append((round((now - self._t_run) * 1000.0, 1), g.x(),
                              g.y(), round(self.windowOpacity(), 3),
                              round(self._p * 100.0, 2), round(self._spin_deg, 1)))
@@ -1535,6 +2136,782 @@ class Toast(QtWidgets.QWidget):
         except Exception:
             pass
 
+# ═════════════════ КАРТОЧКА В ПРОЦЕССЕ X11 (Wayland-native) ════════════════
+# Wayland не даёт клиенту поставить окно по координатам ВООБЩЕ: место выбирает
+# композитор. Поэтому в Wayland-сеансе карточку рисует ОТДЕЛЬНЫЙ процесс того же
+# исполняемого файла с QT_QPA_PLATFORM=xcb (XWayland) — ровно так же, как это
+# делает значок (:func:`_force_x11_for_icon`). Помощник продолжает работать с
+# «карточкой» как раньше: обновления (финал процесса) уходят ей файлом.
+CARD_CHILD_POLL_MS = 250           # как часто помощник проверяет, жив ли ребёнок
+CARD_UPDATE_POLL_MS = 120          # как часто карточка читает файл обновлений
+
+
+def _session_is_kde(env: dict = None) -> bool:
+    """KDE-сеанс? По переменным сеанса, затем по живым процессам KDE."""
+    e = env if env is not None else os.environ
+    if "kde" in str(e.get("XDG_CURRENT_DESKTOP") or "").lower():
+        return True
+    if "kde" in str(e.get("XDG_SESSION_DESKTOP") or "").lower():
+        return True
+    if str(e.get("KDE_FULL_SESSION") or "").lower() in ("true", "1"):
+        return True
+    try:
+        import subprocess
+        r = subprocess.run(["pgrep", "-x", "plasmashell"], capture_output=True,
+                           text=True, timeout=3)
+        return bool((r.stdout or "").strip())
+    except Exception:
+        return False
+
+
+def _xauthority_candidate(runtime_dir: str = "") -> str:
+    """Файл авторизации Xwayland (``/run/user/<uid>/xauth_*``) или ''.
+
+    В Wayland-KDE Xwayland запускается с ``-auth`` на временный файл в
+    ``XDG_RUNTIME_DIR``; имя содержит случайный суффикс, поэтому ищем по маске.
+    Если переменной нет, xcb-клиент из службы не подключится к ``:0``.
+    """
+    import glob
+    cands = []
+    rt = runtime_dir or os.environ.get("XDG_RUNTIME_DIR") or ""
+    if not rt:
+        uid = os.getuid() if hasattr(os, "getuid") else -1
+        rt = "/run/user/%d" % uid if uid >= 0 else ""
+    if rt:
+        cands += sorted(glob.glob(os.path.join(rt, "xauth_*")))
+        cands += sorted(glob.glob(os.path.join(rt, ".mutter-Xwaylandauth*")))
+    cands += [os.path.join(os.path.expanduser("~"), ".Xauthority")]
+    for p in cands:
+        try:
+            if os.path.isfile(p) and os.path.getsize(p) > 0:
+                return p
+        except Exception:
+            continue
+    return ""
+
+
+def x11_force_override(win_id: int) -> bool:
+    """Сделать окно override-redirect НА УРОВНЕ X (``XChangeWindowAttributes``).
+
+    Зачем: ``Qt.BypassWindowManagerHint`` действует только когда окно ещё не
+    создано. Если тип окна поменяли после ``show()`` (или платформа оказалась
+    не xcb), KWin видит управляемое окно и центрирует его. Здесь флаг ставится
+    прямо в X-сервере — после этого позицию держит X, а не оконный менеджер.
+    """
+    if not win_id:
+        return False
+    x11, dpy = _x11_display()
+    if not dpy:
+        return False
+    ok = False
+    try:
+        import ctypes
+
+        class _XSetWinAttributes(ctypes.Structure):
+            _fields_ = [("background_pixmap", ctypes.c_ulong),
+                        ("background_pixel", ctypes.c_ulong),
+                        ("border_pixmap", ctypes.c_ulong),
+                        ("border_pixel", ctypes.c_ulong),
+                        ("bit_gravity", ctypes.c_int),
+                        ("win_gravity", ctypes.c_int),
+                        ("backing_store", ctypes.c_int),
+                        ("backing_planes", ctypes.c_ulong),
+                        ("backing_pixel", ctypes.c_ulong),
+                        ("save_under", ctypes.c_int),
+                        ("event_mask", ctypes.c_long),
+                        ("do_not_propagate_mask", ctypes.c_long),
+                        ("override_redirect", ctypes.c_int),
+                        ("colormap", ctypes.c_ulong),
+                        ("cursor", ctypes.c_ulong)]
+
+        CWOverrideRedirect = 1 << 9
+        a = _XSetWinAttributes()
+        a.override_redirect = 1
+        x11.XChangeWindowAttributes.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+                                               ctypes.c_ulong,
+                                               ctypes.POINTER(_XSetWinAttributes)]
+        x11.XChangeWindowAttributes(dpy, ctypes.c_ulong(int(win_id)),
+                                    ctypes.c_ulong(CWOverrideRedirect),
+                                    ctypes.byref(a))
+        x11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        x11.XSync(dpy, 0)
+        ok = True
+    except Exception:
+        ok = False
+    finally:
+        try:
+            x11.XCloseDisplay(dpy)
+        except Exception:
+            pass
+    return ok
+
+
+def card_place_hard(win_id: int, want: tuple, log_tag: str = "card") -> dict:
+    """Поставить окно карточки в X ЖЁСТКО и вернуть ФАКТ (числа).
+
+    Порядок: override-флаг в X -> XMoveWindow (уже после маппинга) -> чтение
+    XGetWindowAttributes. Возвращает словарь факта; при расхождении с желаемым
+    пишет в журнал ФАКТИЧЕСКИЕ координаты (а не «должно быть»).
+    """
+    if not win_id:
+        return {}
+    want = (int(want[0]), int(want[1]))
+    got = x11_geometry(int(win_id)) or {}
+    if got and not got.get("override_redirect"):
+        if x11_force_override(int(win_id)):
+            got = x11_geometry(int(win_id)) or got
+    if got and (int(got.get("abs_x", -1)), int(got.get("abs_y", -1))) != want:
+        x11_move(int(win_id), want[0], want[1])
+        got = x11_geometry(int(win_id)) or got
+    if got:
+        fact = (int(got.get("abs_x", -1)), int(got.get("abs_y", -1)))
+        if fact != want:
+            try:
+                log.get_logger().warn(
+                    f"forest-ui: {log_tag}: карточка ФАКТИЧЕСКИ в "
+                    f"{fact[0]},{fact[1]} вместо {want[0]},{want[1]} "
+                    f"(override_redirect={got.get('override_redirect')}, "
+                    f"map_state={got.get('map_state')}, "
+                    f"платформа {card_platform()})")
+            except Exception:
+                pass
+        else:
+            try:
+                log.get_logger().info(
+                    f"forest-ui: {log_tag}: карточка стоит в {fact[0]},{fact[1]} "
+                    f"(override_redirect={got.get('override_redirect')})")
+            except Exception:
+                pass
+    return got
+
+
+def card_child_env(base: dict = None) -> dict:
+    """Окружение дочерней карточки: X11 (XWayland), без Wayland.
+
+    ``QT_QPA_PLATFORM=xcb`` — здесь вся суть: под xcb клиент сам ставит окно, и
+    KWin держит эти координаты (проверено xprop на значке).
+
+    ВАЖНО: вычищаем переменные PyInstaller (``_PYI_*``, ``_MEI*``) и пути
+    библиотек от ПРЕДЫДУЩЕЙ распаковки (``LD_LIBRARY_PATH`` и т. п.). Дочерний
+    процесс — тот же one-file архив, он распаковывает СВОЙ каталог; унаследованные
+    пути на чужую распаковку заставляют его загрузить плагины Qt не из своего
+    дерева, и карточка «зависает» (проверено: без этой чистки дочернее окно
+    оставалось на экране).
+    """
+    e = dict(base if base is not None else os.environ)
+    e["QT_QPA_PLATFORM"] = "xcb"
+    e.pop("WAYLAND_DISPLAY", None)      # иначе Qt предпочтёт Wayland
+    e["FOREST_CARD_CHILD"] = "1"
+    # ── ПАСПОРТ СЕАНСА ────────────────────────────────────────────────────────
+    # У службы (`runuser -u … forest-ui`) окружение урезано: в нём может не быть
+    # ни XDG_CURRENT_DESKTOP, ни KDE_FULL_SESSION. Qt тогда не находит плагин
+    # темы KDE (окно выходит СВЕТЛЫМ) и не знает, что сеанс — Wayland.
+    # Ставим то, что известно точно: сеанс Wayland + X11-клиент в XWayland.
+    if not e.get("XDG_SESSION_TYPE"):
+        e["XDG_SESSION_TYPE"] = "wayland"
+    if not e.get("DISPLAY"):
+        e["DISPLAY"] = ":0"
+    if not e.get("XDG_CURRENT_DESKTOP") and _session_is_kde(e):
+        e["XDG_CURRENT_DESKTOP"] = "KDE"
+        e.setdefault("KDE_FULL_SESSION", "true")
+        e.setdefault("KDE_SESSION_VERSION", "6")
+    elif e.get("KDE_FULL_SESSION") is None and _session_is_kde(e):
+        e["KDE_FULL_SESSION"] = "true"
+    # XAUTHORITY: под Wayland-KDE файл авторизации Xwayland лежит в
+    # /run/user/<uid>/xauth_XXXXXX и переменная в сеансе есть не всегда.
+    # Без неё xcb-клиент не подключится к :0 — карточка не покажется вовсе.
+    if not e.get("XAUTHORITY"):
+        cand = _xauthority_candidate(e.get("XDG_RUNTIME_DIR") or "")
+        if cand:
+            e["XAUTHORITY"] = cand
+    for k in list(e):
+        if k.startswith("_PYI") or k.startswith("_MEI"):
+            e.pop(k, None)
+    for k in ("LD_LIBRARY_PATH", "LD_PRELOAD", "QT_PLUGIN_PATH",
+              "QT_QPA_PLATFORM_PLUGIN_PATH", "QML2_IMPORT_PATH",
+              "QTWEBENGINEPROCESS_PATH", "PYTHONHOME", "PYTHONPATH"):
+        e.pop(k, None)
+    return e
+
+
+def _card_child_cmd(spec: str, upd: str) -> list:
+    """Командная строка дочерней карточки — тот же исполняемый файл."""
+    exe = sys.executable or "forest-ui"
+    return [exe, "--card-run", spec, "--update", upd]
+
+
+class _RemoteCard:
+    """Карточка в ДОЧЕРНЕМ процессе X11 — тот же интерфейс, что у :class:`Toast`.
+
+    Помощник в Wayland-сеансе сам поставить окно по координатам не может,
+    поэтому показывает карточку процесс X11 (``--card-run``). Здесь — тонкая
+    обёртка: ``apply_final``/``_proc_id``/``close`` работают как у настоящей
+    карточки, а данные уходят файлом-обновлением.
+    """
+
+    def __init__(self, cfg: dict, proc, upd: str, log_path: str = "",
+                 on_done=None, limit_ms: int = 0):
+        self.cfg = cfg
+        self._proc = proc
+        self._upd = upd
+        self.log_path = log_path
+        self._proc_id = ""
+        self.on_done = on_done
+        self.phase = "remote"
+        self._finished = False
+        self._poll = QtCore.QTimer()
+        self._poll.setInterval(CARD_CHILD_POLL_MS)
+        self._poll.timeout.connect(self._check)
+        self._poll.start()
+        # СТРОГИЙ ПРЕДЕЛ: если дочерняя карточка почему-то не закрылась сама
+        # (зависшая отрисовка в чужом окружении), помощник её снимет, а не
+        # оставит висеть на экране. Обычно до этого не доходит.
+        self._limit = QtCore.QTimer()
+        self._limit.setSingleShot(True)
+        self._limit.timeout.connect(self._expire)
+        self._limit.start(max(10000, int(limit_ms or 0)))
+
+    # ── наружу ──
+    def isVisible(self) -> bool:
+        try:
+            return self._proc.poll() is None
+        except Exception:
+            return False
+
+    def apply_final(self, title: str = "", sub: str = "", footer: str = "",
+                    failed: bool = False, elapsed_ms=None) -> None:
+        """Финал — дочерней карточке (она доводит его в СВОЁМ окне)."""
+        self._write({"title": str(title or ""), "sub": str(sub or ""),
+                     "footer": str(footer or ""), "failed": bool(failed),
+                     "elapsed_ms": elapsed_ms,
+                     "duration_ms": HOLD_FINAL_MS})
+
+    def set_duration(self, ms: int) -> None:
+        self._write({"duration_ms": max(400, int(ms))})
+
+    def close(self) -> None:
+        self._write({"close": True})
+        try:
+            self._proc.wait(timeout=3.0)
+        except Exception:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
+
+    # ── внутреннее ──
+    def _write(self, payload: dict) -> bool:
+        try:
+            tmp = self._upd + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            os.replace(tmp, self._upd)          # атомарно: карточка не прочтёт половину
+            return True
+        except Exception as e:
+            try:
+                log.get_logger().warn(f"forest-ui: обновление карточки не "
+                                      f"записано ({e})")
+            except Exception:
+                pass
+            return False
+
+    def _check(self) -> None:
+        if self._finished:
+            return
+        try:
+            rc = self._proc.poll()
+        except Exception:
+            rc = None
+        if rc is None:
+            return
+        self._finished = True
+        self.phase = "done"
+        self._poll.stop()
+        try:
+            self._limit.stop()
+        except Exception:
+            pass
+        # Ребёнок завершился, не нарисовав карточку (код != 0 и нет строки
+        # «card-run: платформа=…») — это видно в журнале: карточка не вышла.
+        try:
+            shown = False
+            if self.log_path and os.path.isfile(self.log_path):
+                with open(self.log_path, encoding="utf-8", errors="replace") as f:
+                    shown = "card-run: платформа=" in f.read()
+            if int(rc or 0) != 0 and not shown:
+                log.get_logger().warn(
+                    f"forest-ui: карточка X11 завершилась с кодом {rc}, не "
+                    f"показав окно (журнал: {self.log_path})")
+        except Exception:
+            pass
+        try:
+            if callable(self.on_done):
+                self.on_done()
+        except Exception:
+            pass
+
+    def _expire(self) -> None:
+        """Предел показа: снять дочернюю карточку (она обязана исчезнуть сама)."""
+        if self._finished:
+            return
+        try:
+            log.get_logger().warn("forest-ui: карточка X11 не закрылась за "
+                                  "отведённое время — снимаю её принудительно")
+        except Exception:
+            pass
+        try:
+            self._proc.terminate()
+        except Exception:
+            pass
+        self._check()
+
+
+def _file_ok(path: str, min_size: int = 2000) -> bool:
+    """Файл существует и не пустой (снимок «снялся» только если он есть)."""
+    try:
+        return os.path.isfile(path) and os.path.getsize(path) >= min_size
+    except Exception:
+        return False
+
+
+def screenshot_full(path: str) -> str:
+    """Снимок ВСЕГО экрана -> путь файла; ``""`` — снять не удалось.
+
+    Порядок: ``spectacle`` (в Plasma снимает и Wayland-панель), затем ``import``
+    из ImageMagick (X11), затем — ТОЛЬКО если явно разрешено
+    (``FOREST_SHOT_QT_GRAB=1``) — снимок корневого окна средствами Qt. Снимок
+    через Qt выключен по умолчанию намеренно: под XWayland без композитора он
+    роняет процесс ошибкой X (а не исключением Python), а снимок нужен не любой
+    ценой — его отсутствие честно видно в отчёте.
+    """
+    import shutil
+    import subprocess
+    try:
+        d = os.path.dirname(os.path.abspath(path))
+        if d:
+            os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    try:
+        if os.path.exists(path):
+            os.unlink(path)                 # старый снимок не должен «сойти» за новый
+    except Exception:
+        pass
+    if shutil.which("spectacle"):
+        for args in (["-b", "-n", "-f", "-o", path], ["-b", "-n", "-o", path]):
+            try:
+                subprocess.run(["spectacle"] + args, timeout=30,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            except Exception:
+                continue
+            if _file_ok(path):
+                return path
+    if shutil.which("import"):
+        try:
+            subprocess.run(["import", "-window", "root", path], timeout=30,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if _file_ok(path):
+                return path
+        except Exception:
+            pass
+    if str(os.environ.get("FOREST_SHOT_QT_GRAB") or "").lower() in ("1", "true",
+                                                                    "yes"):
+        try:
+            app = QtWidgets.QApplication.instance()
+            scr = app.primaryScreen() if app is not None else None
+            if scr is not None:
+                pm = scr.grabWindow(0)
+                if not pm.isNull() and pm.save(path, "PNG") and _file_ok(path):
+                    return path
+        except Exception:
+            pass
+    return ""
+
+
+def x11_window_info(win_id: int) -> dict:
+    """Что об окне говорит САМ X-сервер: место, размер, тип, состояние.
+
+    ``isVisible()``/``pos()`` — ответы Qt; под XWayland их нужно сверять с X:
+    окно может «быть видимым» и стоять не там. ``xwininfo``/``xprop`` дают
+    фактические координаты и тип окна (``NORMAL``/``NOTIFICATION``/...).
+    """
+    out = {}
+    import shutil
+    import subprocess
+    if not win_id:
+        return out
+    wid = hex(int(win_id))
+    # Место и override-флаг — из X напрямую: xwininfo есть не везде (на живой
+    # CachyOS его нет, и отчёт оставался без координат). x11_geometry работает
+    # через libX11 и не зависит от набора утилит в системе.
+    g = x11_geometry(int(win_id))
+    if g:
+        out.update(g)
+    if shutil.which("xwininfo"):
+        try:
+            r = subprocess.run(["xwininfo", "-id", wid], capture_output=True,
+                               text=True, timeout=10)
+            for line in (r.stdout or "").splitlines():
+                s = line.strip()
+                for key, tag in (("abs_x", "Absolute upper-left X:"),
+                                 ("abs_y", "Absolute upper-left Y:"),
+                                 ("w", "Width:"), ("h", "Height:"),
+                                 ("map_state", "Map State:")):
+                    if s.startswith(tag) and key not in out:
+                        v = s.split(":", 1)[1].strip()
+                        try:
+                            out[key] = v if key == "map_state" else int(v)
+                        except Exception:
+                            out[key] = v
+        except Exception:
+            pass
+    if shutil.which("xprop"):
+        try:
+            r = subprocess.run(["xprop", "-id", wid, "_NET_WM_WINDOW_TYPE",
+                                "_KDE_NET_WM_WINDOW_TYPE", "_NET_WM_STATE",
+                                "WM_NORMAL_HINTS"], capture_output=True,
+                               text=True, timeout=10)
+            for line in (r.stdout or "").splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    if k in ("_NET_WM_WINDOW_TYPE", "_KDE_NET_WM_WINDOW_TYPE",
+                             "_NET_WM_STATE"):
+                        out[k.lower()] = (v.strip()
+                                          .replace("_NET_WM_WINDOW_TYPE_", "")
+                                          .replace("_KDE_NET_WM_WINDOW_TYPE_",
+                                                   "KDE:"))
+        except Exception:
+            pass
+    return out
+
+
+def _card_for_live(cfg: dict, duration_ms: int = 6000):
+    """Карточка состава макета на реальных данных (для живых проверок)."""
+    d = demo_card_data(cfg)
+    return Toast(d["kind"], d["title"], "", cfg, duration_ms=duration_ms,
+                 sub=d["sub"], steps=d["steps"], footer=d["footer"],
+                 spinner=True, total_ms=d["total_ms"], role=d["role"])
+
+
+def _wait_phase(app, t, phases, timeout_s: float) -> str:
+    """Крутит цикл событий, пока фаза карточки не станет одной из ``phases``."""
+    t0 = time.time()
+    while time.time() - t0 < timeout_s:
+        app.processEvents()
+        if getattr(t, "phase", "") in phases:
+            return t.phase
+        time.sleep(0.01)
+    return getattr(t, "phase", "")
+
+
+def _live_one(app, cfg: dict, name: str, shots: str, duration_ms: int,
+              tag: str = "") -> dict:
+    """Показать ОДНУ карточку, снять экран, вернуть числа и данные X-сервера."""
+    os.environ["FOREST_TOAST_FLAGS"] = name
+    t = _card_for_live(cfg, duration_ms)
+    # Снимок «по запросу проверки» здесь не нужен (доказательство — снимок
+    # ЭКРАНА), а захват экрана средствами Qt под XWayland умеет подвисать.
+    t._proof_done = True
+    t.show_toast()
+    _wait_phase(app, t, ("run", "hold"), 4.0)
+    time.sleep(0.35)                      # даём композитору доставить окно
+    app.processEvents()
+    shot_name = f"toast-{tag or name}-{card_platform()}.png"
+    shot = screenshot_full(os.path.join(shots, shot_name)) if shots else ""
+    info = {
+        "preset": t.toast_preset, "platform": card_platform(),
+        "available": ([t._scr.availableGeometry().x(),
+                       t._scr.availableGeometry().y(),
+                       t._scr.availableGeometry().width(),
+                       t._scr.availableGeometry().height()]
+                      if t._scr is not None else None),
+        "screen": ([t._scr.geometry().x(), t._scr.geometry().y(),
+                    t._scr.geometry().width(), t._scr.geometry().height(),
+                    round(float(t._scr.devicePixelRatio()), 2)]
+                   if t._scr is not None else None),
+        "home": [t._home.x(), t._home.y()],
+        "qt_pos": [t.pos().x(), t.pos().y()],
+        "size": [t.width(), t.height()],
+        "duration_ms": int(t.duration_ms),
+        "total_ms": int(t.total_ms),
+        "in_corner": bool(t.pos() == t._home),
+        "slide_ok": bool(t._slide_ok),
+        "shot": shot,
+        "x11": x11_window_info(int(t.winId() or 0)),
+    }
+    info["stats"] = {k: t._stats.get(k) for k in
+                     ("frames", "avg_fps", "worst_ms", "positions",
+                      "pos_start", "pos_end")}
+    # держим до закрытия ПО ТАЙМЕРУ: проверяем и исчезновение. Бюджет — ход
+    # карточки + удержание финала + запас: у карточки процесса он больше.
+    budget = (max(int(t.duration_ms), duration_ms) + int(t.total_ms)
+              + HOLD_FINAL_MS) / 1000.0 + 8.0
+    deadline = time.time() + budget
+    phase = "init"
+    while time.time() < deadline:
+        app.processEvents()
+        try:
+            phase = t.phase
+        except RuntimeError:              # окно уже удалено = закрыто
+            phase = "done"
+            break
+        if phase == "done":
+            break
+        time.sleep(0.01)
+    info["closed_by_timer"] = (phase == "done")
+    info["last_phase"] = phase
+    try:
+        t.close()
+    except Exception:
+        pass
+    return info
+
+
+def toast_live_mode(cfg: dict, shots: str = "", n: int = 1,
+                    duration_ms: int = 6000, preset: str = "") -> int:
+    """ЖИВОЙ показ карточки в углу + СНИМОК ЭКРАНА (доказательство).
+
+    Отвечает на вопрос «где карточка» СНИМКОМ и данными X-сервера, а не
+    ответами Qt. ``n`` карточек показываются ПОДРЯД (следующая — после закрытия
+    предыдущей), поэтому видно, что они не наезжают друг на друга.
+    """
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    app.setQuitOnLastWindowClosed(False)
+    if preset:
+        os.environ["FOREST_TOAST_FLAGS"] = preset
+    shots = shots or os.path.join(_state_dir_of(cfg) or os.getcwd(), "toast-shots")
+    res = {"platform": card_platform(), "preset": toast_preset_name(),
+           "dpr": round(float(app.primaryScreen().devicePixelRatio()), 2)
+           if app.primaryScreen() else 0.0,
+           "screens": [[s.name(), s.geometry().x(), s.geometry().y(),
+                        s.geometry().width(), s.geometry().height(),
+                        s.availableGeometry().y(),
+                        s.availableGeometry().height(),
+                        round(float(s.devicePixelRatio()), 2)]
+                       for s in app.screens()],
+           "cards": []}
+    for i in range(max(1, int(n))):
+        info = _live_one(app, cfg, res["preset"], shots, duration_ms,
+                         tag=f"{i + 1}-{res['preset']}")
+        res["cards"].append(info)
+        if i:                     # вторая карточка: не наехали и та же точка
+            prev = res["cards"][i - 1]
+            res["no_overlap"] = bool(prev.get("closed_by_timer")
+                                     and prev["home"] == info["home"])
+    res["ok"] = all(c.get("in_corner") for c in res["cards"]) and \
+        res.get("no_overlap", True)
+    try:
+        os.makedirs(shots, exist_ok=True)
+        with open(os.path.join(shots, "toast-live.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(res, f, ensure_ascii=False, indent=1)
+    except Exception as e:
+        _say(f"toast-live: json не записан: {e}")
+    _say("toast-live: " + json.dumps(res, ensure_ascii=False))
+    return 0
+
+
+def toast_sweep_mode(cfg: dict, shots: str = "", duration_ms: int = 2600) -> int:
+    """ПЕРЕБОР типов окна: показ + снимок + данные X для КАЖДОГО набора флагов.
+
+    Нужен там, где «правильные» флаги всё равно дают окно по центру: какой тип
+    окна KWin ставит по нашим координатам, видно ТОЛЬКО по снимку экрана.
+    """
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    app.setQuitOnLastWindowClosed(False)
+    shots = shots or os.path.join(_state_dir_of(cfg) or os.getcwd(), "toast-shots")
+    res = {"platform": card_platform(), "cards": []}
+    order = ("tool", "window", "window_plain", "notification", "utility",
+             "override", "bypass", "dock", "tooltip_type", "tooltip", "splash",
+             "dialog")
+    for name in order:
+        if name not in _TOAST_PRESETS:
+            continue
+        try:
+            info = _live_one(app, cfg, name, shots, duration_ms, tag=name)
+        except Exception as e:
+            info = {"preset": name, "error": repr(e)}
+        res["cards"].append(info)
+        _say("toast-sweep: %-12s в_углу=%s qt=%s x11=%s тип=%s снимок=%s"
+             % (name, info.get("in_corner"), info.get("qt_pos"),
+                [info.get("x11", {}).get("abs_x"),
+                 info.get("x11", {}).get("abs_y")],
+                info.get("x11", {}).get("_net_wm_window_type"),
+                os.path.basename(info.get("shot") or "")))
+    os.environ.pop("FOREST_TOAST_FLAGS", None)
+    try:
+        os.makedirs(shots, exist_ok=True)
+        with open(os.path.join(shots, "toast-sweep.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(res, f, ensure_ascii=False, indent=1)
+    except Exception:
+        pass
+    _say("toast-sweep: " + json.dumps(
+        {c.get("preset"): {"in_corner": c.get("in_corner"),
+                           "x11": [c.get("x11", {}).get("abs_x"),
+                                   c.get("x11", {}).get("abs_y")]}
+         for c in res["cards"]}, ensure_ascii=False))
+    return 0
+
+
+def toast_helper_mode(cfg: dict, shots: str = "", n: int = 1,
+                      duration_ms: int = 5000) -> int:
+    """КАРТОЧКА ЧЕРЕЗ ПОМОЩНИКА: настоящий путь ``Ui.show_toast`` + снимки.
+
+    В отличие от :func:`toast_live_mode` здесь НЕ форсируется X11: процесс идёт
+    на той же платформе, что и работающий помощник (в сеансе Wayland — wayland),
+    поэтому проверяется РЕАЛЬНЫЙ путь: карточка в углу через процесс X11.
+    """
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    app.setQuitOnLastWindowClosed(False)
+    shots = shots or os.path.join(_state_dir_of(cfg) or os.getcwd(), "toast-shots")
+    ui = Ui(cfg, tray=False, icon="none")
+    res = {"platform": card_platform(), "can_place_in_process": card_can_be_placed(),
+           "cards": []}
+    for i in range(max(1, int(n))):
+        d = demo_card_data(cfg)
+        st = ui.show_toast(d["kind"], d["title"], "", sub=d["sub"],
+                           steps=d["steps"], footer=d["footer"],
+                           total_ms=d["total_ms"], duration_ms=duration_ms,
+                           spinner=True, role=d["role"], manual=True)
+        info = {"requested": dict(st or {})}
+        t0 = time.time()
+        while time.time() - t0 < 2.5:
+            app.processEvents()               # ждём окно и его место
+            time.sleep(0.01)
+        shot = screenshot_full(os.path.join(
+            shots, f"toast-helper-{i + 1}-{card_platform()}.png"))
+        logp = str((st or {}).get("log") or "")
+        lines = []
+        if logp:
+            try:
+                with open(logp, encoding="utf-8") as f:
+                    lines = [x.strip() for x in f.read().splitlines() if x.strip()]
+            except Exception:
+                pass
+        info.update({"remote": bool((st or {}).get("remote")), "shot": shot,
+                     "child_log": lines[:6],
+                     "child_assert": [x for x in lines
+                                      if x.startswith("card-run:")][:2]})
+        # ждём закрытия (таймер карточки) — но не дольше 20 с
+        t0 = time.time()
+        while time.time() - t0 < 20.0:
+            app.processEvents()
+            if ui.toast_finished:
+                break
+            time.sleep(0.01)
+        info["closed"] = bool(ui.toast_finished)
+        res["cards"].append(info)
+    try:
+        os.makedirs(shots, exist_ok=True)
+        with open(os.path.join(shots, "toast-helper.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(res, f, ensure_ascii=False, indent=1)
+    except Exception:
+        pass
+    _say("toast-helper: " + json.dumps(res, ensure_ascii=False))
+    return 0
+
+
+def card_run_mode(cfg: dict, spec_path: str, upd_path: str = "") -> int:
+    """ДОЧЕРНЯЯ карточка: показать её из JSON и принимать обновления файлом.
+
+    Запускается с ``QT_QPA_PLATFORM=xcb`` (см. :func:`card_child_env`): в
+    сеансе Wayland это единственный способ поставить окно по координатам —
+    тот же путь, что у значка.
+    """
+    try:
+        with open(spec_path, encoding="utf-8") as f:
+            spec = json.load(f) or {}
+    except Exception as e:
+        _say(f"card-run: не прочитан {spec_path}: {e}")
+        return 2
+    d = spec.get("card") or {}
+    if spec.get("preset"):
+        os.environ["FOREST_TOAST_FLAGS"] = str(spec["preset"])
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    app.setQuitOnLastWindowClosed(False)
+    stats = {}
+
+    def done():
+        app.quit()
+
+    t = Toast(str(d.get("kind") or "busy"), str(d.get("title") or ""),
+              str(d.get("body") or ""), cfg,
+              duration_ms=int(d.get("duration_ms") or 5000),
+              fps=int(d.get("fps") or 60), stats_sink=stats, on_done=done,
+              sub=str(d.get("sub") or ""), steps=d.get("steps") or [],
+              footer=str(d.get("footer") or ""), spinner=True,
+              total_ms=int(d.get("total_ms") or 0),
+              role=str(d.get("role") or "restore"))
+    t.show_toast()
+    # Снимок «по запросу проверки» (state/card_shot.json) дочерней карточке не
+    # нужен: его ждёт ЖИВОЙ помощник, а не этот процесс, — и захват экрана под
+    # XWayland умеет подвисать. Карточка-ребёнок рисует и закрывается.
+    t._proof_done = True
+    # СТРОГИЙ ПРЕДЕЛ ЖИЗНИ ОКНА: карточка обязана исчезнуть даже если отрисовка
+    # в этом окружении идёт медленно. Обычно её закрывает собственный таймер.
+    hard = QtCore.QTimer()
+    hard.setSingleShot(True)
+    hard.timeout.connect(app.quit)
+    hard.start(max(12000, int(d.get("duration_ms") or 5000)
+                   + int(d.get("total_ms") or 0) + HOLD_FINAL_MS + 15000))
+    _say(f"card-run: платформа={card_platform()} набор={t.toast_preset} "
+         f"место=({t._home.x()},{t._home.y()}) размер={t.width()}x{t.height()}")
+    app.processEvents()
+    # ОКНО УЖЕ ОТОБРАЖЕНО — ставим его ЖЁСТКО в X и печатаем ФАКТ.
+    # Здесь и только здесь решается «в углу / по центру»: override-флаг на уровне
+    # X (если Qt его не поставил), затем XMoveWindow после маппинга, затем чтение
+    # XGetWindowAttributes. Числа ниже — ответ X-сервера, а не намерение Qt.
+    _wid = int(t.winId() or 0)
+    _fact = card_place_hard(_wid, (t._home.x(), t._home.y()), "card-run")
+    _say("card-run: X11 ФАКТ " + json.dumps(_fact, ensure_ascii=False))
+    _say("card-run: X11 " + json.dumps(x11_window_info(_wid),
+                                       ensure_ascii=False))
+    seen = {"t": 0.0}
+    if upd_path:
+        tm = QtCore.QTimer()
+
+        def poll():
+            try:
+                mt = os.path.getmtime(upd_path)
+            except Exception:
+                return
+            if mt <= seen["t"]:
+                return
+            seen["t"] = mt
+            try:
+                with open(upd_path, encoding="utf-8") as f:
+                    u = json.load(f) or {}
+            except Exception:
+                return
+            if u.get("close"):
+                t.close()
+                app.quit()
+                return
+            if u.get("duration_ms"):
+                t.duration_ms = max(400, int(u["duration_ms"]))
+            if t.phase not in ("done", "out"):
+                t.apply_final(str(u.get("title") or ""),
+                              str(u.get("sub") or ""),
+                              str(u.get("footer") or ""),
+                              failed=bool(u.get("failed")),
+                              elapsed_ms=u.get("elapsed_ms"))
+
+        tm.setInterval(CARD_UPDATE_POLL_MS)
+        tm.timeout.connect(poll)
+        tm.start()
+    rc = app.exec()
+    _say("card-run: закрыта, кадров=%s среднее=%s" %
+         (stats.get("frames"), stats.get("avg_fps")))
+    try:
+        os.unlink(spec_path)               # за собой убираем
+    except Exception:
+        pass
+    return int(rc or 0)
+
+
 def notification_body(sub: str, body: str, steps, footer: str) -> str:
     """Тело СИСТЕМНОГО уведомления (Linux): этапы и время идут В ТЕЛЕ.
 
@@ -1593,6 +2970,10 @@ def build_menu_model(cfg: dict, owner=None) -> tuple:
     m.add_separator()
     m.add(mk("watchdog", tr("tray.menu.watchdog"), True))
     m.add(mk("notify", tr("tray.menu.notify"), True))
+    # ── РЕЖИМ ЗНАЧКА (переключатель, действует сразу) ──
+    # галочка = штатный значок области уведомлений (ui.tray_mode="sni");
+    # снятая = своё окно-значок с нашим меню (ui.tray_mode="own")
+    m.add(mk("tray_sni", tr("tray.menu.tray_sni"), True))
     # ── ФИЛЬТРЫ (подменю с галочками) ──
     # Логика фильтров живёт в tray_menu (CMD_FILTER_RU/CMD_FILTER_CF); здесь
     # только вывод и передача команды супервизору через state/ui_cmd.json.
@@ -1648,6 +3029,12 @@ def sync_menu_actions(cfg: dict, acts: dict, tip: str = "", raw: dict = None) ->
         wd, nf, th, ru, cf = True, True, "auto", False, True
     acts["watchdog"].setChecked(wd)
     acts["notify"].setChecked(nf)
+    # галочка режима значка: «в области уведомлений» = ui.tray_mode != "own"
+    try:
+        tm = str(((cfg.get("ui") or {}).get("tray_mode") or "sni")).lower()
+        acts["tray_sni"].setChecked(tm != "own")
+    except Exception:
+        acts["tray_sni"].setChecked(True)
     # галочки фильтров — по ТЕКУЩЕМУ состоянию настроек (и по нашему, и по
     # изменённому программой: настройки читаем заново каждый тик)
     acts["filter_ru"].setChecked(ru)
@@ -1704,15 +3091,32 @@ class _NoTray:
 
 
 class Ui(QtCore.QObject):
-    def __init__(self, cfg: dict, quiet: bool = False, tray: bool = True):
+    def __init__(self, cfg: dict, quiet: bool = False, tray: bool = True,
+                 icon: str = None):
         super().__init__()
         self.cfg = cfg
         # quiet=True — «не показывать карточку»: нужно проверкам (замер кадров
         # меню на живом экране не должен вытаскивать уведомления на экран)
         self.quiet = bool(quiet)
-        # tray=False — БЕЗ значка в трее: режим ``--menu-popup`` (плазмоид KDE
-        # показывает НАШЕ меню отдельным процессом, второго значка быть не должно)
-        self.has_tray = bool(tray)
+        # tray=False — БЕЗ значка в трее: режим ``--menu-popup`` (второго значка
+        # быть не должно).  ``icon`` выбирает РЕАЛИЗАЦИЮ значка:
+        #   * "sni"   — QSystemTrayIcon (Windows, X11-панели: XFCE/MATE/LXQt);
+        #   * "popup" — своё окно-значок в стиле трея (см. :mod:`tray_popup`):
+        #               правый клик по SNI-значку в Plasma забирает лоток, а по
+        #               виджету панели — сама панель, поэтому в KDE нужен свой.
+        self.icon_mode = str(icon or "").lower()
+        if self.icon_mode not in ("sni", "popup", "none"):
+            # настройка ui.tray_mode: "sni" (по умолчанию) | "own"
+            self.icon_mode = ("none" if not tray else self._mode_from_cfg())
+        if self.icon_mode == "own":
+            self.icon_mode = "popup"
+        self._icon_arg = str(icon or "").lower()      # явный выбор режима (проверки)
+        # ЗАПАСНОЙ режим значка (1.3.9, дефект D1): когда штатного лотка в
+        # рабочем столе нет, значок поднимается своим окном ВОПРЕКИ настройке
+        # ui.tray_mode. Пока флаг стоит, refresh() не переспрашивает настройку —
+        # иначе запасной значок жил ровно один тик (2 с) и исчезал.
+        self._tray_fallback = False
+        self.has_tray = self.icon_mode != "none"
         self.kind = "off"
         self.tip = ""
         self.acting = False
@@ -1738,17 +3142,30 @@ class Ui(QtCore.QObject):
         # QMenu трею НЕ отдаём НИКОГДА (см. _on_tray_activated): в XEmbed-панелях
         # (XFCE, MATE, Cinnamon, LXQt) setContextMenu приводил к тому, что правый
         # клик рисовал штатный QMenu панели вместо НАШЕГО окна.
-        self.tray = (QtWidgets.QSystemTrayIcon(self) if self.has_tray
-                     else _NoTray())
+        # В KDE Plasma и SNI-значок, и виджет панели правый клик забирают себе,
+        # поэтому там значок — своё окно (tray_popup): оно отдаёт нам ТО ЖЕ
+        # событие Context, и весь код ниже работает без изменений.
+        if self.icon_mode == "popup":
+            import tray_popup as TP
+            self.tray = TP.PopupTrayIcon(self.cfg, parent=self)
+        else:
+            self.tray = (QtWidgets.QSystemTrayIcon(self) if self.has_tray
+                         else _NoTray())
+        self._qt_menu = None
         self.refresh()
         if self.has_tray:
             try:
                 self.tray.activated.connect(self._on_tray_activated)
             except Exception:
                 pass
+            if self.icon_mode == "sni":
+                # МЕНЮ В SNI: полноценный QMenu на ТЕ ЖЕ QAction — панель
+                # забирает его по DBusMenu и рисует сама (правый клик).
+                self._build_qt_menu()
             self.tray.show()
             self.timer = QtCore.QTimer(self)
-            self.timer.setInterval(1000)
+            # 2 с: подсказка обязана быть свежей БЕЗ кликов по значку
+            self.timer.setInterval(REFRESH_MS)
             self.timer.timeout.connect(self.refresh)
             self.timer.start()
         else:
@@ -1759,6 +3176,139 @@ class Ui(QtCore.QObject):
             QtCore.QTimer.singleShot(0, self._ping)
 
     # ── меню ──
+    def _mode_from_cfg(self) -> str:
+        """Режим значка из настроек: ``ui.tray_mode`` — ``sni`` (по умолчанию) | ``own``."""
+        try:
+            m = str(((self.cfg.get("ui") or {}).get("tray_mode") or "")).lower()
+        except Exception:
+            m = ""
+        return "popup" if m == "own" else "sni"
+
+    def _build_qt_menu(self) -> None:
+        """Полное QMenu для режима SNI — на ТЕ ЖЕ QAction, что и наше меню.
+
+        В SNI меню рисует панель: Qt экспортирует QMenu по DBusMenu, и правый
+        клик по значку открывает ЕГО. Состав обязан совпадать с нашим меню
+        один в один (11 пунктов + «Фильтры» с двумя галочками + «Тема
+        оформления» с тремя), поэтому QMenu собирается из той же модели.
+        """
+        if not self.has_tray or self.icon_mode != "sni":
+            return
+        try:
+            menu = QtWidgets.QMenu()
+            menu.setStyleSheet(qss_for(self.cfg))
+            for row in (self.menu_model or UMN.MenuGroup()).rows:
+                if getattr(row, "kind", "item") != "item":
+                    menu.addSeparator()
+                    continue
+                act = getattr(row, "act", None)
+                if row.has_sub():
+                    sub = QtWidgets.QMenu(row.text(), menu)
+                    sub.setStyleSheet(qss_for(self.cfg))
+                    for r2 in (row.sub.rows or []):
+                        if getattr(r2, "kind", "item") != "item":
+                            sub.addSeparator()
+                            continue
+                        if getattr(r2, "act", None) is not None:
+                            sub.addAction(r2.act)
+                    menu.addMenu(sub)
+                    continue
+                if act is not None:
+                    menu.addAction(act)
+            # обработчики — ТЕ ЖЕ, что у нашего меню (один пункт = один путь)
+            for key, act in (self.acts or {}).items():
+                if key == "status":
+                    continue
+                try:
+                    if act.property("fui_wired"):
+                        continue
+                    act.setProperty("fui_wired", True)
+                    act.triggered.connect(
+                        lambda _checked=False, k=key: self._qt_trigger(k))
+                except Exception:
+                    pass
+            self._qt_menu = menu
+            self.tray.setContextMenu(menu)
+            log.get_logger().info(
+                f"forest-ui: меню SNI собрано ({len(self.acts)} пунктов, "
+                f"подменю: фильтры/тема)")
+        except Exception:
+            self._tray_error("сборка QMenu для SNI")
+
+    def _qt_trigger(self, key: str) -> None:
+        """Пункт QMenu нажат: галочка — переключатель, иначе — команда."""
+        act = (self.acts or {}).get(key)
+        if act is None:
+            return
+        try:
+            if act.isCheckable():
+                self._menu_toggle(key, act.isChecked())
+            else:
+                self._menu_activate(key)
+        except Exception:
+            self._tray_error(f"пункт меню SNI «{key}»")
+
+    def _apply_tray_mode(self, mode: str) -> None:
+        """Сменить режим значка НА ЛЕТУ: старый снять ЦЕЛИКОМ, новый поднять.
+
+        Требование: только ОДИН значок и без второго процесса. Поэтому старый
+        значок прячется и уничтожается (``destroy``), QMenu отсоединяется, и
+        только потом создаётся новый.
+        """
+        mode = "popup" if str(mode).lower() in ("own", "popup") else "sni"
+        if not self.has_tray or mode == self.icon_mode:
+            return
+        old = getattr(self, "tray", None)
+        try:
+            if old is not None:
+                old.hide()
+        except Exception:
+            pass
+        try:
+            if isinstance(old, QtWidgets.QSystemTrayIcon):
+                old.setContextMenu(None)
+                old.deleteLater()
+            else:
+                old.destroy()
+        except Exception:
+            pass
+        self._qt_menu = None
+        self.icon_mode = mode
+        self._create_tray()
+        try:
+            log.get_logger().warn(
+                f"forest-ui: режим значка переключён на «{mode}» "
+                f"({'область уведомлений' if mode == 'sni' else 'своё окно'}), "
+                f"старый значок снят")
+        except Exception:
+            pass
+
+    def _create_tray(self) -> None:
+        """Создать значок текущего режима и НАПОЛНИТЬ его состоянием."""
+        if self.icon_mode == "popup":
+            import tray_popup as TP
+            self.tray = TP.PopupTrayIcon(self.cfg, parent=self)
+        elif self.icon_mode == "sni" and self.has_tray:
+            self.tray = QtWidgets.QSystemTrayIcon(self)
+        else:
+            self.tray = _NoTray()
+        if self.has_tray:
+            try:
+                self.tray.activated.connect(self._on_tray_activated)
+            except Exception:
+                pass
+            if self.icon_mode == "sni":
+                self._build_qt_menu()
+            try:
+                self.tray.setIcon(icon_from_state(self.kind, self.cfg))
+                if self.tip:
+                    self.tray.setToolTip(self.tip)
+                if hasattr(self.tray, "set_state"):
+                    self.tray.set_state(self.kind, self.tip)
+            except Exception:
+                pass
+            self.tray.show()
+
     def _build_menu(self) -> None:
         """Собирает модель меню общим путём (:func:`build_menu_model`).
 
@@ -1823,6 +3373,10 @@ class Ui(QtCore.QObject):
                 return                    # левый клик/двойной — меню не открываем
         except Exception:
             self._tray_error("разбор причины клика")
+            return
+        if self.icon_mode == "sni":
+            # В SNI меню рисует ПАНЕЛЬ по нашему QMenu (DBusMenu) — второе,
+            # своё окно поверх него открывать нельзя (было бы два меню).
             return
         self._show_menu_guarded(self._icon_anchor())
 
@@ -1928,6 +3482,11 @@ class Ui(QtCore.QObject):
         if name == "open_log":
             self.open_log()
             return
+        if name == "tray_sni":
+            # Режим значка: применяем СРАЗУ и сохраняем в ui.tray_mode
+            self._set_tray_mode("sni" if self.acts["tray_sni"].isChecked()
+                                else "own")
+            return
         cmd = mapping.get(name)
         if not cmd:
             return
@@ -1940,6 +3499,44 @@ class Ui(QtCore.QObject):
         if not ok:
             self.show_toast("error", tr("ui.cmd_failed", err="state/ui_cmd.json"),
                             cmd)
+
+    def _set_tray_mode(self, want: str) -> None:
+        """Режим значка: применить сейчас + сохранить в ``ui.tray_mode``.
+
+        Сохраняет СЛУЖБА (config.json в /etc принадлежит root, помощник писать
+        туда не может), поэтому команда уходит и в файл-команду. Применение —
+        немедленное: значок меняется на месте, без перезапуска программы.
+        """
+        want = "own" if str(want).lower() in ("own", "popup") else "sni"
+        # Явный выбор пользователя снимает «запасной» статус: дальше режим
+        # снова ведётся настройкой ui.tray_mode (гард D1 в refresh).
+        self._tray_fallback = False
+        try:
+            self.cfg.setdefault("ui", {})["tray_mode"] = want
+        except Exception:
+            pass
+        self._apply_tray_mode(want)
+        saved = False
+        try:
+            import tray_menu as TM
+            saved = bool(TM.TrayActions(self.cfg).set_tray_mode(want == "sni"))
+        except Exception:
+            saved = False
+        if not saved:
+            # прямого доступа к конфигу нет — просим службу записать ключ
+            try:
+                UC.write_cmd(self.cfg, "tray_sni" if want == "sni" else "tray_own")
+            except Exception:
+                pass
+        try:
+            log.get_logger().warn(
+                f"forest-ui: режим значка -> {want} "
+                f"(запись в конфиг: {'да' if saved else 'через службу'})")
+        except Exception:
+            pass
+        self.show_toast("ok", tr("tray.menu.tray_sni"),
+                        tr("tray.msg.mode_own" if want == "own"
+                           else "tray.msg.mode_sni"), duration_ms=2600)
 
     def status_file(self) -> str:
         """Файл отчёта ``--status`` (если есть) — как «Открыть статус» в эталоне."""
@@ -2164,6 +3761,25 @@ class Ui(QtCore.QObject):
             self.last_stats = {"painted": False, "suppressed": off,
                                "kind": kind, "manual": False, "frames": 0}
             return self.last_stats
+        # ── АНТИСПАМ (пункт регрессии на живом KWin) ────────────────────
+        # 1) Неудача поиска/пустой пул — ТОЛЬКО журнал, карточки нет ни разу.
+        # 2) Одна карточка на ТИП СОБЫТИЯ не чаще раза в 60 с: разные номера
+        #    процесса с одинаковым текстом больше не дают очередь окон.
+        if not manual and not getattr(self, "_demo", False):
+            if card_is_search_noise(kind, title, body, sub):
+                try:
+                    log.get_logger().info(
+                        f"forest-ui: карточка «{kind}» НЕ показана — неудача "
+                        f"поиска/пустой пул, только журнал: {title}")
+                except Exception:
+                    pass
+                self.last_stats = {"painted": False, "suppressed": "поиск/пул",
+                                   "kind": kind, "manual": False, "frames": 0}
+                return self.last_stats
+            if self._card_throttled(kind, title, body, sub):
+                self.last_stats = {"painted": False, "suppressed": "антиспам 60с",
+                                   "kind": kind, "manual": False, "frames": 0}
+                return self.last_stats
         s = {}
         try:
             import notify as N
@@ -2201,6 +3817,15 @@ class Ui(QtCore.QObject):
                                              footer, dur)
         self.last_stats = {}
         self.toast_finished = False
+        # WAYLAND-NATIVE: своим окном координаты не поставить — их выбирает
+        # композитор. Тогда карточку рисует процесс X11 (XWayland) — тот же
+        # путь, которым идёт значок. Не удалось запустить — показываем карточку
+        # здесь же (как раньше), но об этом будет строка в журнале.
+        if not card_can_be_placed():
+            st = self._show_remote_card(kind, title, body, sub, step_lines,
+                                        footer, dur, fps, total_ms, role)
+            if st is not None:
+                return st
         try:
             t = Toast(kind, title, body, self.cfg, duration_ms=dur, fps=fps,
                       stats_sink=self.last_stats, on_done=self._toast_done,
@@ -2224,6 +3849,163 @@ class Ui(QtCore.QObject):
     def _toast_done(self) -> None:
         self.toast_finished = True
         self.toast = None
+
+    def _show_remote_card(self, kind: str, title: str, body: str, sub: str,
+                          step_lines, footer: str, dur: int, fps: int,
+                          total_ms: int, role: str):
+        """Карточка в процессе X11 (XWayland) — когда Wayland не даёт позицию.
+
+        Помощник пишет описание карточки в файл и запускает ЭТОТ ЖЕ
+        исполняемый файл с ``--card-run`` и ``QT_QPA_PLATFORM=xcb``: под X11
+        клиент сам ставит окно, и KWin держит координаты (как у значка).
+        Возвращает статистику показа или ``None`` — тогда вызывающий показывает
+        карточку обычным путём (лучше карточка не в углу, чем никакой).
+        """
+        import subprocess
+        d = _state_dir_of(self.cfg) or ""
+        if not d:
+            return None
+        if not os.environ.get("DISPLAY"):
+            # XWayland недоступен -> позиционировать нечем: пусть карточка
+            # выйдет обычным путём (лучше не в углу, чем никак), но с записью.
+            try:
+                log.get_logger().warn("forest-ui: нет DISPLAY (XWayland) — "
+                                      "карточка показывается в процессе Wayland")
+            except Exception:
+                pass
+            return None
+        # DISPLAY есть — но живой ли он? Проверяем РЕАЛЬНЫМ подключением к X
+        # (тот же клиент Xlib, что у значка): иначе дочерняя карточка не покажется
+        # вовсе, и пользователь не увидит НИЧЕГО. Не открылось — обычная карточка.
+        try:
+            import tray_popup as TP
+            if not bool(getattr(TP._X11(), "ok", False)):
+                try:
+                    log.get_logger().warn("forest-ui: X-сервер не открылся — "
+                                          "карточка показывается в процессе Wayland")
+                except Exception:
+                    pass
+                return None
+        except Exception:
+            return None
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            return None
+        cid = f"{os.getpid()}-{int(time.time() * 1000) % 100000000}"
+        spec_p = os.path.join(d, f"ui_card_{cid}.json")
+        upd_p = os.path.join(d, f"ui_card_{cid}.update.json")
+        log_p = os.path.join(d, f"ui_card_{cid}.log")
+        spec = {"card": {"kind": kind, "title": title, "body": body,
+                         "sub": sub, "footer": footer,
+                         "steps": [x["nm"] + "   " + str(x["ms"]) + " мс"
+                                   for x in (step_lines or [])]
+                         if step_lines and isinstance(step_lines[0], dict)
+                         else [str(x) for x in (step_lines or [])],
+                         "total_ms": int(total_ms or 0),
+                         "duration_ms": int(dur), "fps": int(fps),
+                         "role": role},
+                "preset": toast_preset_name()}
+        try:
+            with open(spec_p, "w", encoding="utf-8") as f:
+                json.dump(spec, f, ensure_ascii=False)
+        except Exception as e:
+            try:
+                log.get_logger().warn(f"forest-ui: карточка не описана ({e})")
+            except Exception:
+                pass
+            return None
+        try:
+            lf = open(log_p, "w", encoding="utf-8")
+            proc = subprocess.Popen(_card_child_cmd(spec_p, upd_p),
+                                    env=card_child_env(), stdin=subprocess.DEVNULL,
+                                    stdout=lf, stderr=lf, close_fds=True,
+                                    start_new_session=True)
+        except Exception as e:
+            try:
+                log.get_logger().warn(f"forest-ui: карточка X11 не запущена ({e}) "
+                                      f"— показываю карточку в процессе Wayland")
+            except Exception:
+                pass
+            return None
+        card = _RemoteCard(self.cfg, proc, upd_p, log_p,
+                           on_done=self._toast_done,
+                           limit_ms=(int(dur) + max(0, int(total_ms or 0))
+                                     + HOLD_FINAL_MS + 20000))
+        self.toast = card
+        self.last_stats = {"remote": True, "pid": int(proc.pid),
+                           "preset": toast_preset_name(),
+                           "platform": card_platform(),
+                           "spec": spec_p, "log": log_p}
+        try:
+            log.get_logger().info(
+                f"forest-ui: карточка рисуется процессом X11 (pid={proc.pid}, "
+                f"QT_QPA_PLATFORM=xcb, набор {toast_preset_name()})")
+        except Exception:
+            pass
+        return self.last_stats
+
+    def _card_throttled(self, kind: str, title: str, body: str = "",
+                        sub: str = "") -> bool:
+        """True — такую карточку уже показывали меньше 60 с назад (антиспам).
+
+        Ключ — ТИП СОБЫТИЯ (вид + заголовок + подпись), а не номер процесса:
+        сторож при мёртвом пуле писал новый номер на каждую попытку, и каждая
+        попытка выкатывала новое окно. Теперь повтор того же события — строка
+        в журнале, не окно.
+        """
+        now = time.time()
+        key = (str(kind or ""), str(title or "")[:80],
+               (str(sub or "") or str(body or ""))[:80])
+        seen = getattr(self, "_card_seen", None)
+        if seen is None:
+            seen = self._card_seen = {}
+        for k in [k for k, t in seen.items() if now - float(t) > 600.0]:
+            seen.pop(k, None)                  # старые ключи не копим
+        last = float(seen.get(key, 0.0) or 0.0)
+        seen[key] = now
+        if last and (now - last) < CARD_THROTTLE_S:
+            try:
+                log.get_logger().info(
+                    f"forest-ui: карточка «{kind}: {title}» НЕ показана — "
+                    f"повтор через {now - last:.0f} с при пороге "
+                    f"{CARD_THROTTLE_S:.0f} с (антиспам)")
+            except Exception:
+                pass
+            return True
+        return False
+
+    def _proc_card_gate(self, proc: dict) -> bool:
+        """True — карточку ЭТОГО ИСХОДА процесса показывать не надо (антиспам).
+
+        Ключ — «событие» (вид, причина, провал), а НЕ номер процесса. Сторож при
+        мёртвом пуле писал новый номер на каждую попытку (в журнале ×191 за
+        60 с), и каждая попытка выкатывала карточку: на живом KWin это был поток
+        окон по центру экрана с перехватом фокуса. Повтор исхода — строка в
+        журнале, не чаще раза в 60 с.
+        """
+        if getattr(self, "quiet", False) or getattr(self, "_demo", False):
+            return False
+        key = ("proc", str(proc.get("kind") or ""), str(proc.get("cause") or ""),
+               bool(proc.get("failed")))
+        now = time.time()
+        seen = getattr(self, "_proc_seen", None)
+        if seen is None:
+            seen = self._proc_seen = {}
+        for k in [k for k, t in seen.items() if now - float(t) > 600.0]:
+            seen.pop(k, None)
+        last = float(seen.get(key, 0.0) or 0.0)
+        seen[key] = now
+        if last and (now - last) < CARD_THROTTLE_S:
+            try:
+                log.get_logger().info(
+                    f"forest-ui: карточка процесса {key[1]}/{key[2]}"
+                    f"{'/провал' if key[3] else ''} НЕ показана — повтор через "
+                    f"{now - last:.1f} с при пороге {CARD_THROTTLE_S:.0f} с")
+            except Exception:
+                pass
+            return True
+        return False
 
     def _card_gate(self, why: str) -> bool:
         """True — карточку показывать НЕ надо: в коротком окне уже была карточка.
@@ -2304,13 +4086,43 @@ class Ui(QtCore.QObject):
             pass
         kind, tip = read_state(self.cfg)
         raw = read_raw_state(self.cfg)
-        if kind != self.kind or tip != self.tip:
-            prev_kind = self.kind
-            self.kind, self.tip = kind, tip
-            self.tray.setIcon(icon_from_state(kind, self.cfg))
+        changed = (kind != self.kind or tip != self.tip)
+        prev_kind = self.kind
+        self.kind, self.tip = kind, tip
+        # ИНДИКАЦИЯ ОБНОВЛЯЕТСЯ КАЖДЫЙ ТИК (2 с), а не только при смене
+        # состояния и не по закрытию меню: подсказка должна быть свежей сама.
+        # Значок перерисовываем лишь при смене состояния (это дорого — ICO),
+        # подсказку и цвет обновляем всегда.
+        try:
+            if changed:
+                self.tray.setIcon(icon_from_state(kind, self.cfg))
             self.tray.setToolTip(tip)
+            # своё окно-значок: цвет и текст подсказки (иначе он оставался
+            # серым «off» независимо от состояния)
+            if hasattr(self.tray, "set_state"):
+                self.tray.set_state(kind, tip)
+        except Exception:
+            self._tray_error("обновление значка/подсказки")
+        if changed:
+            try:
+                log.get_logger().info(
+                    f"forest-ui: подсказка обновлена «{tip}» "
+                    f"(источник: {raw.get('_path') or 'нет файла'})")
+            except Exception:
+                pass
             if not self.first:
                 self._on_transition(prev_kind, kind)
+        # режим значка мог быть переключён из меню — настройку читаем заново.
+        # ГАРД D1: запасной значок (лотка нет) НЕ должен откатываться на «sni»
+        # каждые 2 с — настройку в этом случае не переспрашиваем вовсе.
+        try:
+            want = self._mode_from_cfg()
+            cur = "own" if self.icon_mode == "popup" else "sni"
+            if (self.has_tray and not getattr(self, "_tray_fallback", False)
+                    and want != cur):
+                self._apply_tray_mode(want)
+        except Exception:
+            self._tray_error("переключение режима значка")
         self.first = False
         # подписи и галочки меню — ОБЩИМ путём (тот же код у доказательств):
         # строка состояния, надзор, уведомления, фильтры, отметка темы
@@ -2326,11 +4138,15 @@ class Ui(QtCore.QObject):
         if pid and pid != getattr(self, "_proc_id", ""):
             self._proc_id = pid
             self._proc_shown_final = False
-            self.show_process_card(proc)
+            if self._proc_card_gate(proc):
+                pass                       # повтор того же исхода — только журнал
+            else:
+                self.show_process_card(proc)
         elif pid and proc.get("final") and not getattr(self, "_proc_shown_final",
                                                        False):
             self._proc_shown_final = True
-            self.show_process_card(proc)
+            if not self._proc_card_gate(proc):
+                self.show_process_card(proc)
         elif not pid:
             self._proc_id = ""
         # Меню: цвета берём из ОБЩЕЙ таблицы при каждом показе; если тема
@@ -3896,6 +5712,23 @@ def selftest(cfg: dict) -> int:
             (n_ctx, n_ctx_int, n_trig, n_trig_int, n_dbl) == (1, 2, 2, 2, 2),
             f"показов: Context={n_ctx}, int(Context)={n_ctx_int}, "
             f"Trigger={n_trig}, int(Trigger)={n_trig_int}, DoubleClick={n_dbl}")
+    elif getattr(ui, "icon_mode", "") == "sni":
+        # SNI (1.3.9, D4): меню по протоколу рисует ПАНЕЛЬ из нашего QMenu
+        # (DBusMenu), поэтому setContextMenu ОБЯЗАН быть вызван, а Context в
+        # программу не приходит — своё окно поверх панельного не открываем.
+        # Проверки писались под XEmbed и противоречили коду 1.3.8.
+        try:
+            pm_sni = ui.tray.contextMenu()
+        except Exception:
+            pm_sni = None
+        chk("Linux/SNI: QMenu ОТДАН трею (setContextMenu) — меню рисует панель",
+            pm_sni is not None,
+            f"contextMenu={'<QMenu>' if pm_sni is not None else None}, "
+            f"пунктов в модели={len(getattr(ui, 'acts', {}) or {})}")
+        chk("Linux/SNI: правый клик НЕ открывает второе (своё) меню",
+            n_ctx == 0 and n_ctx_int == 0 and n_trig == 0 and n_dbl == 0,
+            f"показов своего окна: Context={n_ctx}, int(Context)={n_ctx_int}, "
+            f"Trigger={n_trig}, DoubleClick={n_dbl}")
     else:
         # XEmbed-панели (XFCE, MATE, Cinnamon, LXQt) доставляют правый клик
         # программе как Context — меню обязано быть НАШИМ окном, а не QMenu.
@@ -3906,22 +5739,38 @@ def selftest(cfg: dict) -> int:
             n_trig == n_ctx_int and n_trig_int == n_ctx_int and n_dbl == n_ctx_int,
             f"показов: Trigger={n_trig}, int(Trigger)={n_trig_int}, "
             f"DoubleClick={n_dbl} (после правых {n_ctx_int})")
-    # QMenu трею НЕ отдаём НИ НА ОДНОЙ платформе: пока он был отдан, XEmbed-панели
-    # открывали штатное меню Qt вместо нашего окна (это и был дефект 1.3.2).
-    try:
-        pm = ui.tray.contextMenu()
-    except Exception:
-        pm = None
-    chk("QMenu трею не отдан (setContextMenu убран) — правый клик рисуем сами",
-        pm is None, f"contextMenu={pm!r}")
-    # БЕЗОПАСНОСТЬ: исключение внутри показа меню не вылетает наружу
-    log_path = os.path.join(SD.log_dir(), "main.log")
-
-    def _log_tail():
+    # В XEmbed/своём окне QMenu трею НЕ отдаём: пока он был отдан, XEmbed-панели
+    # открывали штатное меню Qt вместо нашего окна (дефект 1.3.2). В SNI —
+    # наоборот, отдаём: иначе меню в панели не будет вовсе (см. ветку выше).
+    if getattr(ui, "icon_mode", "") != "sni":
         try:
-            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
-                return f.read()[-4000:]
+            pm = ui.tray.contextMenu()
         except Exception:
+            pm = None
+        chk("QMenu трею не отдан (setContextMenu убран) — правый клик рисуем сами",
+            pm is None, f"contextMenu={pm!r}")
+    # ── БЕЗОПАСНОСТЬ: исключение внутри показа меню не вылетает наружу ──
+    # Журнал читаем по ФАКТИЧЕСКОМУ пути логгера (а не только по SD.log_dir):
+    # бандл и проверки могут писать в разные каталоги, и проверка «сбой записан»
+    # ложно падала из-за места, а не из-за кода (артефакт стенда с 1.3.2).
+    try:
+        log_paths = []
+        try:
+            log_paths.append(str(log.get_logger().path))
+        except Exception:
+            pass
+        log_paths.append(os.path.join(SD.log_dir(), "main.log"))
+
+        def _log_tail():
+            for p in log_paths:
+                try:
+                    with open(p, "r", encoding="utf-8", errors="replace") as f:
+                        return f.read()[-4000:]
+                except Exception:
+                    continue
+            return ""
+    except Exception:
+        def _log_tail():
             return ""
 
     before_log = _log_tail()
@@ -3930,10 +5779,17 @@ def selftest(cfg: dict) -> int:
         raise RuntimeError("искусственный сбой показа меню (проверка)")
 
     escaped = ""
+    snip = getattr(ui, "icon_mode", "") == "sni"
     try:
         ui.show_menu = _boom_menu
-        # Проверяем именно СЛОТ трея на обеих платформах: правый клик — один путь.
-        ui._on_tray_activated(ARC.Context)
+        if snip:
+            # SNI: слот Context в программу не приходит, поэтому проверяем
+            # СТОРОЖ показа меню — тот же путь, которым идёт правый клик в
+            # режиме своего окна и любой другой показ нашей панели.
+            ui._show_menu_guarded(QtCore.QPoint(10, 10))
+        else:
+            # Проверяем именно СЛОТ трея: правый клик — один путь.
+            ui._on_tray_activated(ARC.Context)
     except BaseException as _e:                      # noqa: BLE001 — ловим ВСЁ
         escaped = repr(_e)
     finally:
@@ -4888,49 +6744,191 @@ _LOCK = None            # замок помощника, удерживаемы�
 
 
 def _lock_path(cfg: dict) -> str:
-    d = ((cfg or {}).get("paths") or {}).get("state_dir") or ""
-    return os.path.join(d, "forest-ui.lock") if d else ""
+    """Замок помощника в ПЕРВОМ пригодном месте (см. _instance_lock_candidates)."""
+    c = _instance_lock_candidates(cfg)
+    return c[0] if c else ""
+
+
+def _uid() -> int:
+    try:
+        return os.getuid()
+    except Exception:
+        return -1
+
+
+def _runtime_dir() -> str:
+    """Каталог, куда ЭТОТ пользователь гарантированно может писать: /run/user/<uid>.
+
+    ``$XDG_RUNTIME_DIR`` приходит по наследству от того, кто запустил: служба
+    (root) передаёт свой, а помощнику он недоступен. Поэтому имя каталога
+    сверяем с НАШИМ uid, а не берём переменную на веру.
+    """
+    u = _uid()
+    want = "/run/user/%d" % u if u >= 0 else ""
+    for d in (os.environ.get("XDG_RUNTIME_DIR") or "", want):
+        try:
+            if d and os.path.isdir(d) and (u < 0 or os.stat(d).st_uid == u):
+                return d
+        except Exception:
+            continue
+    return ""
+
+
+def _instance_lock_candidates(cfg: dict) -> list:
+    """Куда пытаться положить замок единственного экземпляра, по порядку.
+
+    Замок обязан лежать там, где писать может ИМЕННО этот uid. Раньше путь
+    брался ТОЛЬКО из ``paths.state_dir``, а он у службы и у сеансового
+    помощника РАЗНЫЙ (root: /var/lib/…, пользователь: ~/.local/state/…) либо
+    вовсе недоступен на запись — тогда ``acquire()`` уходил в «деградацию»,
+    решение принималось по пульсу, и каждая новая копия стартовала. На живой
+    машине 1.3.5 это дало ТРИ одновременных значка.
+    """
+    out = []
+    rt = _runtime_dir()
+    if rt:
+        out.append(os.path.join(rt, "forest-ui.lock"))
+    sd = ((cfg or {}).get("paths") or {}).get("state_dir") or ""
+    if sd:
+        out.append(os.path.join(sd, "forest-ui.lock"))
+    u = _uid()
+    if u >= 0:
+        # Последняя опора: /tmp, но файл приватен по ИМЕНИ (uid в имени).
+        out.append(os.path.join("/tmp", "forest-ui-%d.lock" % u))
+    seen, res = set(), []
+    for p in out:
+        if p and p not in seen:
+            seen.add(p)
+            res.append(p)
+    return res
+
+
+def _proc_uid(pid: int):
+    try:
+        with open("/proc/%d/status" % int(pid), encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("Uid:"):
+                    return int(line.split()[1])
+    except Exception:
+        pass
+    return None
+
+
+def _ancestors() -> set:
+    """Наши предки: распаковщик PyInstaller — тот же файл ``forest-ui``."""
+    out, pid = set(), os.getpid()
+    for _ in range(6):
+        try:
+            with open("/proc/%d/stat" % pid, encoding="utf-8", errors="replace") as f:
+                st = f.read()
+            ppid = int(st[st.rindex(")") + 2:].split()[1])
+        except Exception:
+            break
+        if ppid <= 1:
+            break
+        out.add(ppid)
+        pid = ppid
+    return out
+
+
+def _other_instances() -> list:
+    """Живые копии помощника для ЭТОГО uid ('' — Linux-независимая проверка).
+
+    Нужна как ВТОРАЯ линия: если ни один замок взять не удалось (чужой файл,
+    ФС только для чтения), решение принимается по факту — есть ли уже процесс.
+    Предки (распаковщик onefile) и служебные режимы (``--card-run`` и т. п.) не
+    считаются: они живут ровно столько, сколько нужно, и значка не создают.
+    """
+    if IS_WIN:
+        return []
+    me, anc, u = os.getpid(), _ancestors(), _uid()
+    found = []
+    try:
+        names = {n.encode() for n in (b"forest-ui",)}
+    except Exception:
+        names = set()
+    try:
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            if pid == me or pid in anc:
+                continue
+            try:
+                exe = os.readlink("/proc/%d/exe" % pid)
+            except Exception:
+                continue
+            if os.path.basename(exe).lower() not in ("forest-ui", "forest-ui.exe"):
+                continue
+            if u >= 0 and _proc_uid(pid) != u:
+                continue
+            try:
+                with open("/proc/%d/cmdline" % pid, "rb") as f:
+                    argv = f.read().split(b"\0")
+            except Exception:
+                argv = []
+            if any(a.startswith(b"--card-run") or a.startswith(b"--show")
+                   or a.startswith(b"--toast") or a.startswith(b"--menu-")
+                   or a.startswith(b"--tray-demo") or a.startswith(b"--tray-probe")
+                   for a in argv):
+                continue
+            found.append(pid)
+    except Exception:
+        return []
+    return found
 
 
 def single_instance_guard(cfg: dict) -> bool:
-    """True — работаем; False — помощник уже запущен (тихо выходим).
+    """True — работаем; False — помощник уже запущен (тихо выходим, код 0).
 
     Решение принимает ЗАМОК (эксклюзивная блокировка файла, см.
-    ``src/instancelock.py``), а не PID в файле пульса. Пульс появляется с
-    задержкой, поэтому два одновременных запуска проходили старую проверку
-    оба — теперь замок достаётся ровно одному, второй тихо выходит.
-    Если замок недоступен (деградация), работает прежний признак по пульсу.
+    ``src/instancelock.py``), а не PID в файле пульса. Замок берётся в каталоге,
+    который ЭТОТ uid может писать (``$XDG_RUNTIME_DIR`` / ``/run/user/<uid>``),
+    иначе — в каталоге состояния, иначе — в /tmp с uid в имени. Если ни один
+    путь не дал замка (все заняты или недоступны), решает наличие живого
+    процесса помощника того же uid: второй значок не поднимается никогда.
     """
     global _LOCK
     os.environ["FOREST_UI"] = "1"        # этот процесс — помощник
-    p = _lock_path(cfg)
-    locked = False
+    info = {"pid": os.getpid(), "ts": time.time(), "exe": sys.executable,
+            "uid": _uid(),
+            "root": ((cfg or {}).get("paths") or {}).get("root", "")}
+    imports_ok = True
     try:
         import instancelock as IL
-        lk = IL.InstanceLock(p, tag="forest-ui")
-        if lk.acquire({"pid": os.getpid(), "ts": time.time(),
-                       "exe": sys.executable,
-                       "root": ((cfg or {}).get("paths") or {}).get("root", "")}):
-            _LOCK = lk
-            locked = True
-            if lk.degraded:
-                locked = False           # замок не работает — решаем по пульсу
     except Exception:
-        _LOCK = None
-    if locked:
-        UC.write_ping(cfg, os.getpid(), "qt")
-        return True
-    # деградация: прежний признак (живой pid в пульсе)
-    try:
-        pp = UC.ping_path(cfg)
-        if os.path.isfile(pp):
-            with open(pp, encoding="utf-8") as f:
-                d = json.load(f)
-            pid = int(d.get("pid", 0) or 0)
-            if pid and pid != os.getpid() and _alive(pid):
-                return False
-    except Exception:
-        pass
+        imports_ok = False
+    if imports_ok:
+        for p in _instance_lock_candidates(cfg):
+            try:
+                lk = IL.InstanceLock(p, tag="forest-ui")
+                if not lk.acquire(info):
+                    # Замок держит ЖИВОЙ процесс — это и есть второй экземпляр.
+                    who = ""
+                    try:
+                        d = IL.read_info(p)
+                        who = " pid=%s" % d.get("pid") if d.get("pid") else ""
+                    except Exception:
+                        pass
+                    _say(f"forest-ui: замок занят ({p}{who}) — второй экземпляр "
+                         f"не нужен, выхожу")
+                    return False
+                if lk.degraded:
+                    # Замок не работает в этом месте (нет прав/ФС): пробуем
+                    # следующее, а не «считаем себя владельцем».
+                    lk.release(unlink=False)
+                    continue
+                _LOCK = lk
+                UC.write_ping(cfg, os.getpid(), "qt")
+                return True
+            except Exception:
+                continue
+    # Все замки недоступны/заняты — решает ФАКТ жизни процесса того же uid.
+    others = _other_instances()
+    if others:
+        _say("forest-ui: помощник уже работает (pid=%s) — второй экземпляр "
+             "не нужен, выхожу" % ",".join(str(p) for p in others[:4]))
+        return False
     UC.write_ping(cfg, os.getpid(), "qt")
     return True
 
@@ -4950,16 +6948,63 @@ def _alive(pid: int) -> bool:
         return False
 
 
+def _stop_one(pid: int) -> bool:
+    """SIGTERM, ожидание до 2 с, затем SIGKILL. True — процесса больше нет."""
+    import signal
+    for sig, wait in ((signal.SIGTERM, 2.0), (signal.SIGKILL, 1.0)):
+        try:
+            os.kill(int(pid), sig)
+        except ProcessLookupError:
+            return True
+        except Exception:
+            return False
+        dl = time.time() + wait
+        while time.time() < dl:
+            if not _alive(int(pid)):
+                return True
+            time.sleep(0.05)
+    return not _alive(int(pid))
+
+
 def stop_running(cfg: dict) -> int:
-    """Просит работающий помощник выйти (файл-флаг) и ждёт."""
-    p = os.path.join((cfg.get("paths") or {}).get("state_dir", ""), "ui_stop.flag")
+    """Останавливает ВСЕ копии помощника этого пользователя. 0 — никого не осталось.
+
+    Раньше здесь только писался ``ui_stop.flag`` в каталог состояния ТОГО, кто
+    вызвал ``--stop``. Служба держит помощника с ДРУГИМ каталогом состояния,
+    флага он не видел — печаталось «старый значок остановлен», а процессы
+    оставались (на живой машине 1.3.5 их было три). Теперь: флаг (для старых
+    сборок) + сигнал по ФАКТУ найденным процессам (замки + /proc) + ожидание.
+    """
+    sd = (cfg.get("paths") or {}).get("state_dir", "")
+    if sd:
+        try:
+            os.makedirs(sd, exist_ok=True)
+            with open(os.path.join(sd, "ui_stop.flag"), "w", encoding="utf-8") as f:
+                f.write("stop")
+        except Exception:
+            pass
+    pids = []
     try:
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w", encoding="utf-8") as f:
-            f.write("stop")
-    except Exception as e:
-        _say(f"не удалось запросить остановку: {e}")
-        return 2
+        import instancelock as IL
+        for p in _instance_lock_candidates(cfg):
+            pid = int((IL.read_info(p) or {}).get("pid") or 0)
+            if pid and pid != os.getpid() and _alive(pid) and pid not in pids:
+                pids.append(pid)
+    except Exception:
+        pass
+    for pid in _other_instances():
+        if pid not in pids:
+            pids.append(pid)
+    if not pids:
+        _say("forest-ui: работающих копий помощника нет")
+        return 0
+    left = [p for p in pids if not _stop_one(p)]
+    if left:
+        _say("forest-ui: НЕ удалось остановить pid=%s" %
+             ",".join(str(p) for p in left))
+        return 1
+    _say("forest-ui: остановлено копий помощника: %d (pid=%s)"
+         % (len(pids), ",".join(str(p) for p in pids)))
     return 0
 
 
@@ -5114,6 +7159,12 @@ def main(argv=None) -> int:
         log.reset_logger((cfg.get("paths") or {}).get("log_dir"))
     except Exception:
         pass
+    # --stop обрабатывается ДО проверки графической сессии: остановка не
+    # требует дисплея, а раньше без сеанса (ssh, служба, сценарий установки)
+    # помощник выходил здесь с кодом 0 и НЕ останавливал ничего — отсюда
+    # «старый значок остановлен» при трёх живых копиях.
+    if "--stop" in argv:
+        return stop_running(cfg)
     # Графическую сессию проверяем ДО создания QApplication (см.
     # _no_graphics_reason): без неё Qt аварийно завершается вместо тихого
     # выхода. Для проверок (--selftest, --menu-dump) включаем платформу
@@ -5130,8 +7181,6 @@ def main(argv=None) -> int:
             pass
         _say(msg)
         return 0
-    if "--stop" in argv:
-        return stop_running(cfg)
     if "--menu-dump" in argv:
         # Необязательный аргумент — путь файла: пишем дамп в UTF-8, чтобы проверки
         # не зависели от кодировки консоли (оконная сборка отдаёт cp1251).
@@ -5188,6 +7237,66 @@ def main(argv=None) -> int:
         _say(f"frames={stats.get('frames')} avg_fps={stats.get('avg_fps')} "
               f"worst_ms={stats.get('worst_ms')}")
         return 0
+    if "--card-run" in argv:
+        # ДОЧЕРНЯЯ КАРТОЧКА (процесс X11, QT_QPA_PLATFORM=xcb): помощник в
+        # сеансе Wayland сам поставить окно по координатам не может — этот
+        # процесс ставит. Обновления (финал процесса) приходят файлом.
+        i = argv.index("--card-run")
+        spec = argv[i + 1] if len(argv) > i + 1 else ""
+        upd = ""
+        if "--update" in argv:
+            j = argv.index("--update")
+            upd = argv[j + 1] if len(argv) > j + 1 else ""
+        return card_run_mode(cfg, spec, upd)
+    if "--toast-live" in argv or "--toast-sweep" in argv or "--toast-helper" in argv:
+        # ЖИВЫЕ ПРОВЕРКИ КАРТОЧКИ: показ, СНИМОК ЭКРАНА и координаты из X.
+        # --toast-live   — карточка в углу (форсируем X11: он и ставит окно);
+        # --toast-sweep  — перебор типов окна (что KWin ставит по координатам);
+        # --toast-helper — реальный путь Ui.show_toast (Wayland -> процесс X11).
+        shots, n, ms, preset, keep_x11 = "", 1, 6000, "", True
+        rest = argv[argv.index("--toast-live") + 1:] if "--toast-live" in argv \
+            else argv
+        for j, a in enumerate(rest):
+            if a == "--shots" and j + 1 < len(rest):
+                shots = str(rest[j + 1])
+            elif a == "--n" and j + 1 < len(rest):
+                try:
+                    n = max(1, int(float(rest[j + 1])))
+                except Exception:
+                    n = 1
+            elif a == "--ms" and j + 1 < len(rest):
+                try:
+                    ms = max(1000, int(float(rest[j + 1])))
+                except Exception:
+                    ms = 6000
+            elif a == "--preset" and j + 1 < len(rest):
+                preset = str(rest[j + 1])
+        if "--toast-helper" in argv:
+            # Карточка через помощника — тот же путь, что у поднятого службой
+            # процесса. Платформу теперь нормализует САМ помощник (xcb в
+            # Wayland-сеансе с Xwayland), поэтому здесь keep_x11 остаётся как у
+            # основного пути: иначе проверка мерила бы путь, которого в жизни нет.
+            rest = argv[argv.index("--toast-helper") + 1:]
+            for j, a in enumerate(rest):
+                if a == "--shots" and j + 1 < len(rest):
+                    shots = str(rest[j + 1])
+                elif a == "--n" and j + 1 < len(rest):
+                    try:
+                        n = max(1, int(float(rest[j + 1])))
+                    except Exception:
+                        n = 1
+                elif a == "--ms" and j + 1 < len(rest):
+                    try:
+                        ms = max(1000, int(float(rest[j + 1])))
+                    except Exception:
+                        ms = 5000
+        if keep_x11:
+            _force_x11_for_icon()      # карточку ставит X11 — проверяем именно его
+        if "--toast-sweep" in argv:
+            return toast_sweep_mode(cfg, shots, duration_ms=min(ms, 3000))
+        if "--toast-helper" in argv:
+            return toast_helper_mode(cfg, shots, n=n, duration_ms=ms)
+        return toast_live_mode(cfg, shots, n=n, duration_ms=ms, preset=preset)
     if "--card-shots" in argv:
         # ДОКАЗАТЕЛЬСТВО без показа окон: карточка рисуется вне экрана, с неё
         # снимается серия кадров удержания (спиннер/полоса/карточка), PNG и
@@ -5256,7 +7365,42 @@ def main(argv=None) -> int:
                     s["primary"]))
         app.quit()
         return 0
+    if "--tray-probe" in argv:
+        # ЧИСЛА для отчёта: где встанет значок, какая платформа, видно ли
+        # полноэкранное приложение. Окно не показывается.
+        _force_x11_for_icon()
+        app = QtWidgets.QApplication([])
+        import tray_popup as TP
+        p = TP.probe(cfg)
+        _say(TP.describe_probe(p))
+        app.quit()
+        return 0
+    if "--tray-icon" in argv:
+        return tray_icon_mode(cfg)
+    if "--tray-demo" in argv:
+        # ДИАГНОСТИКА на живом экране: значок + контрольное окно, затем ожидание.
+        _force_x11_for_icon()
+        app = QtWidgets.QApplication([])
+        import tray_popup as TP
+        i = argv.index("--tray-demo")
+        sec = float(argv[i + 1]) if len(argv) > i + 1 else 25.0
+        rc = TP.demo(cfg, sec)
+        app.quit()
+        return rc
+    if "--tray-selftest" in argv:
+        i = argv.index("--tray-selftest")
+        out = argv[i + 1] if len(argv) > i + 1 and not argv[i + 1].startswith("--") else ""
+        return tray_selftest(cfg, out)
     # (проверка графической сессии — выше, до QApplication)
+    # ПЛАТФОРМА ПОМОЩНИКА: в Wayland-сеансе с Xwayland помощник работает
+    # X11-клиентом. Это НЕ косметика — здесь причина двух дефектов сразу:
+    #   * Wayland не даёт клиенту позицию, поэтому карточка вставала по центру
+    #     (место выбирал KWin), а override-redirect тип не применялся вовсе;
+    #   * без xcb не подхватывается KDE-плагин темы, и карточка со значком
+    #     выходили СВЕТЛЫМИ при тёмном рабочем столе.
+    # Раньше вызов был только в служебных режимах (--tray-icon/--tray-demo/…),
+    # а ОСНОВНОЙ путь помощника (его и поднимает служба) оставался Wayland.
+    _force_x11_for_icon()
     app = QtWidgets.QApplication([])
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName(APP)
@@ -5269,6 +7413,16 @@ def main(argv=None) -> int:
     ui = Ui(cfg)
     _say(f"forest-ui: работает (pid={os.getpid()}, "
           f"трей={'есть' if QtWidgets.QSystemTrayIcon.isSystemTrayAvailable() else 'недоступен'})")
+    _ensure_visible_icon(ui, cfg)
+    return run_loop(app, ui, cfg)
+
+
+def run_loop(app, ui, cfg: dict) -> int:
+    """Цикл событий помощника + флаг «остановись» из программы.
+
+    Вынесено из :func:`main`, чтобы режим своего значка (``--tray-icon``)
+    работал РОВНО так же: тот же пульс, та же остановка, никакой второй логики.
+    """
     stop_flag = os.path.join((cfg.get("paths") or {}).get("state_dir", ""),
                              "ui_stop.flag")
     t = QtCore.QTimer()
@@ -5295,6 +7449,283 @@ def main(argv=None) -> int:
     except Exception:
         pass
     return rc
+
+
+def _force_x11_for_icon() -> str:
+    """Свой значок — X11-окно в XWayland: только там клиент ставит координаты.
+
+    Wayland (``xdg-shell``) не даёт клиенту позиционировать окно, а layer-shell
+    через ``layer-shell-qt`` недоступен из Python и несовместим по ABI с Qt
+    внутри нашей сборки (см. docstring :mod:`tray_popup`). KWin — оконный
+    менеджер XWayland — ставит X11-окно по нашим координатам и держит поверх.
+    Возвращает имя платформы для журнала.
+    """
+    plat = os.environ.get("QT_QPA_PLATFORM", "")
+    if plat:
+        return plat
+    if IS_WIN:
+        return "windows"
+    wayland = bool(os.environ.get("WAYLAND_DISPLAY")) or \
+        str(os.environ.get("XDG_SESSION_TYPE", "")).lower() == "wayland"
+    if wayland and os.environ.get("DISPLAY"):
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
+        return "xcb (XWayland)"
+    return "auto"
+
+
+def own_icon_possible() -> tuple:
+    """Можно ли показать СВОЙ значок-окно. -> (да/нет, причина).
+
+    Своё окно ставится по координатам только на X11/XWayland. Если сеанс на
+    Wayland БЕЗ Xwayland (``DISPLAY`` пуст), позиционировать окно нечем —
+    тогда честно остаётся значок лотка (SNI), а не окно в случайном месте.
+    """
+    plat = _force_x11_for_icon()
+    if IS_WIN:
+        return (False, "Windows: штатный значок трея")
+    if plat != "auto":
+        # платформу задали снаружи (xcb/offscreen/...) — доверяем ей
+        return (plat in ("xcb",), f"платформа задана: {plat}")
+    if os.environ.get("DISPLAY"):
+        return (True, "X11/XWayland (DISPLAY есть)")
+    return (False, "Wayland без Xwayland: окно не поставить по координатам")
+
+
+def _fallback_icon_reason() -> str:
+    """Почему нет штатного значка: для журнала и одной строки пользователю."""
+    try:
+        if not QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
+            return ("в этом рабочем столе нет области уведомлений "
+                    "(нет org.kde.StatusNotifierWatcher: GNOME без расширения, "
+                    "часть сборок LXQt, голый оконный менеджер)")
+    except Exception:
+        pass
+    return ""
+
+
+def _ensure_visible_icon(ui, cfg: dict) -> None:
+    """P1/P2: нет лотка — поднять СВОЁ окно-значок вместо «тихо без значка».
+
+    Проверяется после создания значка: если система говорит, что лотка нет,
+    значок SNI не покажется НИКОГДА, и пользователь остаётся без индикации и без
+    меню. Тогда сразу берём свой значок (он уже реализован), пишем причину в
+    журнал и показываем одну строку notification-send, если он есть.
+    """
+    try:
+        avail = QtWidgets.QSystemTrayIcon.isSystemTrayAvailable()
+    except Exception:
+        avail = True
+    if avail or ui.icon_mode == "popup" or not ui.has_tray:
+        return
+    why = _fallback_icon_reason()
+    ok_own, own_why = own_icon_possible()
+    try:
+        log.get_logger().warn(
+            f"forest-ui: штатного значка нет — {why}. Свой значок: "
+            f"{'поднимаю' if ok_own else 'невозможен (' + own_why + ')'}")
+    except Exception:
+        pass
+    if not ok_own:
+        return
+    # ВАЖНО: это ЗАПАСНОЙ режим, а не выбор пользователя — ui.tray_mode не
+    # меняем, иначе на машине с лотком значок остался бы своим навсегда.
+    # Зато помечаем режим флагом: refresh() (тик 2 с) обязан его уважать,
+    # иначе он перечитывал настройку «sni» и снимал значок через 2 с (D1).
+    try:
+        ui._tray_fallback = True
+    except Exception:
+        pass
+    ui._apply_tray_mode("own")
+    if ui.icon_mode != "popup":
+        return
+    try:
+        msg = ("FOREST: в этом рабочем столе нет области уведомлений — "
+               "показываю свой значок у края панели")
+        import shutil
+        import subprocess
+        if shutil.which("notify-send"):
+            subprocess.run(["notify-send", "-a", APP, "-t", "6000",
+                            "FOREST's Proxy Auto-updater", msg],
+                           timeout=5, check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def tray_icon_mode(cfg: dict) -> int:
+    """Поднять ЕДИНСТВЕННЫЙ значок в режиме из ``ui.tray_mode``.
+
+    Два режима, одновременно — только один значок и один процесс:
+
+    * **sni** (по умолчанию) — штатный значок области уведомлений
+      (``QSystemTrayIcon``). Меню рисует ПАНЕЛЬ по нашему ``QMenu`` (DBusMenu):
+      те же пункты и обработчики, системный вид, значок можно прятать в скрытые
+      значки силами панели. X11/Xwayland не нужен вовсе;
+    * **own** — своё плавающее окно-значок у края панели (:mod:`tray_popup`) с
+      НАШИМ меню (стиль, анимация), только X11/XWayland.
+
+    Режим меняется и на лету из меню (``Ui._apply_tray_mode``), здесь — выбор
+    при запуске.
+    """
+    pref = "own" if str(((cfg.get("ui") or {}).get("tray_mode")
+                         or "")).lower() == "own" else "sni"
+    if pref == "sni":
+        # Платформу НЕ навязываем: SNI по DBus работает и на Wayland
+        ok, why = (True, "")
+        app = QtWidgets.QApplication([])
+        app.setQuitOnLastWindowClosed(False)
+        app.setApplicationName(APP)
+        if not single_instance_guard(cfg):
+            _say("forest-ui: значок уже работает — второй не нужен")
+            return 0
+        ui = Ui(cfg, icon="sni")
+        avail = QtWidgets.QSystemTrayIcon.isSystemTrayAvailable()
+        _say(f"forest-ui: режим значка «область уведомлений» (sni), "
+             f"лоток {'есть' if avail else 'НЕДОСТУПЕН'}, pid={os.getpid()}")
+        # P1/P2: лотка нет (GNOME без расширения, часть LXQt, голый WM) —
+        # поднимаем СВОЁ окно-значок и говорим причину, а не «тихо без значка»
+        _ensure_visible_icon(ui, cfg)
+        return run_loop(app, ui, cfg)
+    plat = _force_x11_for_icon()
+    ok, why = own_icon_possible()
+    app = QtWidgets.QApplication([])
+    app.setQuitOnLastWindowClosed(False)
+    app.setApplicationName(APP)
+    if not single_instance_guard(cfg):
+        _say("forest-ui: значок уже работает — второй не нужен")
+        return 0
+    if not ok:
+        # Позиционировать своё окно нечем (Wayland без Xwayland) — берём значок
+        # лотка: пусть правый клик там забирает панель, но значок ЕСТЬ и он один.
+        _say(f"tray-icon: своё окно невозможно ({why}) — беру значок лотка")
+        ui = Ui(cfg, icon="sni")
+        return run_loop(app, ui, cfg)
+    try:
+        ui = Ui(cfg, icon="popup")
+    except Exception:
+        # Своё окно не поднялось — не оставляем пользователя без значка:
+        # честно уходим на SNI-значок (он работает везде, где есть лоток).
+        _say("tray-icon: своё окно не поднялось — беру значок лотка")
+        try:
+            log.get_logger().error("tray-icon: откат на SNI:\n"
+                                   + traceback.format_exc())
+        except Exception:
+            pass
+        ui = Ui(cfg)
+    g = ui.tray.geometry()
+    _say(f"forest-ui: значок-окно {g.width()}x{g.height()} в "
+         f"({g.x()},{g.y()}) pid={os.getpid()} платформа={plat}")
+    return run_loop(app, ui, cfg)
+
+
+def _fake_click(widget, button) -> None:
+    """Настоящее событие Qt в окно значка (без мыши и без XTest)."""
+    c = QtCore.QPointF(widget.width() / 2.0, widget.height() / 2.0)
+    g = QtCore.QPointF(widget.mapToGlobal(widget.rect().center()))
+    for typ in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonRelease):
+        ev = QtGui.QMouseEvent(typ, c, g, button, button, Qt.KeyboardModifier.NoModifier)
+        QtWidgets.QApplication.sendEvent(widget, ev)
+
+
+def tray_selftest(cfg: dict, out_dir: str = "") -> int:
+    """Проверка СВОЕГО значка без мыши: окно -> правый клик -> НАШЕ меню.
+
+    Доказательства кладутся файлами (PNG значка и меню) и печатаются числами:
+    где окно, сколько пунктов в меню, куда оно встало относительно значка,
+    молчит ли левый клик и нет ли второго (SNI) значка.
+    """
+    plat = _force_x11_for_icon()
+    app = QtWidgets.QApplication([])
+    app.setQuitOnLastWindowClosed(False)
+    ui = Ui(cfg, quiet=True, icon="popup")
+    bad = []
+
+    def chk(name, ok, extra=""):
+        _say(("  ✓ " if ok else "  ✗ ") + name + ((" — " + extra) if extra else ""))
+        if not ok:
+            bad.append(name)
+
+    w = ui.tray.win
+    w.show_icon()
+    for _ in range(30):
+        app.processEvents()
+        if w.isVisible():
+            break
+        time.sleep(0.02)
+    g = ui.tray.geometry()
+    area = w._area()
+    _say(f"tray-selftest: платформа={plat} экран={w._screen().geometry()} "
+         f"рабочая={area}")
+    _say(f"  окно значка {g.width()}x{g.height()} в ({g.x()},{g.y()}) "
+         f"правый край={g.right()} низ={g.bottom()}")
+    chk("значок показан", w.isVisible(), f"visible={w.isVisible()}")
+    chk("значок прижат к правому нижнему углу рабочей области",
+        g.right() <= area.right() and g.bottom() <= area.bottom()
+        and area.right() - g.right() <= 40 and area.bottom() - g.bottom() <= 40,
+        f"отступы справа={area.right() - g.right()} снизу={area.bottom() - g.bottom()}")
+    chk("размер значка 16..64 px", 16 <= g.width() <= 64, f"{g.width()} px")
+    chk("значок всегда поверх", bool(w.windowFlags() & Qt.WindowStaysOnTopHint))
+    chk("значок не забирает фокус",
+        bool(w.windowFlags() & Qt.WindowDoesNotAcceptFocus))
+    chk("значок не в списке задач (Qt.Tool)",
+        bool(w.windowFlags() & Qt.Tool))
+    chk("SNI-значка в этом режиме НЕТ",
+        not any(isinstance(x, QtWidgets.QSystemTrayIcon)
+                for x in ui.findChildren(QtWidgets.QSystemTrayIcon))
+        and not isinstance(ui.tray, QtWidgets.QSystemTrayIcon))
+
+    # ── ЛЕВЫЙ клик: ничего не открывается ──
+    _fake_click(w, Qt.LeftButton)
+    for _ in range(10):
+        app.processEvents()
+    chk("левый клик не открывает меню",
+        ui._menu_panel is None or not ui._menu_panel.isVisible())
+
+    # ── ПРАВЫЙ клик: НАШЕ меню у значка ──
+    time.sleep(0.4)
+    _fake_click(w, Qt.RightButton)
+    pnl = ui._menu_panel
+    for _ in range(60):
+        app.processEvents()
+        if pnl is not None and pnl.isVisible():
+            break
+        time.sleep(0.02)
+    ok_menu = pnl is not None and pnl.isVisible()
+    chk("правый клик открывает НАШЕ меню (ui_menu.PopupMenu)", ok_menu,
+        type(pnl).__name__ if pnl is not None else "нет окна")
+    if ok_menu:
+        rows = len(pnl.rows)
+        pg = QtCore.QRect(pnl.mapToGlobal(QtCore.QPoint(0, 0)), pnl.size())
+        _say(f"  меню {pnl.panel_w}x{pnl.panel_h} в ({pg.x()},{pg.y()}) "
+             f"пунктов={rows}")
+        chk("в меню есть пункты", rows >= 5, f"{rows} шт.")
+        chk("меню встало У значка (не в центре экрана)",
+            abs(pg.right() - g.right()) < 80 and pg.bottom() <= g.top() + 40,
+            f"низ меню={pg.bottom()} верх значка={g.top()}")
+        chk("меню внутри экрана",
+            area.contains(QtCore.QPoint(pg.left() + 4, pg.top() + 4)))
+        if out_dir:
+            try:
+                os.makedirs(out_dir, exist_ok=True)
+                pnl.grab().save(os.path.join(out_dir, "tray-menu.png"))
+            except Exception as e:
+                _say(f"  (снимок меню не сохранён: {e})")
+    if out_dir:
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            w.grab().save(os.path.join(out_dir, "tray-icon.png"))
+            w.tip.set_text(w._title(), w._tip, w.accent())
+            w.tip.show_near(w.geometry())
+            for _ in range(20):
+                app.processEvents()
+            w.tip.grab().save(os.path.join(out_dir, "tray-tip.png"))
+            _say(f"  снимки: {out_dir}/tray-icon.png, tray-tip.png, tray-menu.png")
+        except Exception as e:
+            _say(f"  (снимки не сохранены: {e})")
+    ui.tray.hide()
+    app.processEvents()
+    _say("tray-selftest: " + ("ВСЁ ХОРОШО" if not bad else f"ОШИБОК {len(bad)}: " + "; ".join(bad)))
+    return 0 if not bad else 1
 
 
 if __name__ == "__main__":

@@ -86,11 +86,49 @@ def _tray_settle(cfg: dict, client: dict, proc, lg, rtt=None) -> None:
         if ok:
             TS.finish_proc(cfg, proc, "ok", tip=_tip("связь OK"))
             TS.write_status(cfg, state="ok", rtt=rtt)
+        elif _fail_card_due(lg, "финал восстановления"):
+            reason = _fail_reason()
+            lg.error(f"Watch: связь не восстановлена — {reason}")
+            TS.fail_proc(cfg, proc, "down", _tip("НЕТ СВЯЗИ"), reason=reason)
         else:
-            TS.fail_proc(cfg, proc, "down", _tip("НЕТ СВЯЗИ"),
-                         reason="серверы пула не отвечают")
+            TS.beat(cfg, "down", _tip("НЕТ СВЯЗИ"))
     except Exception as e:
         lg.error(f"Watch: финал индикации: {e}")
+
+
+def _fail_reason() -> str:
+    """ПОЧЕМУ не вышло — одной строкой: причина ядра, если известна.
+
+    «серверы пула не отвечают» одинаково выглядит при отсутствующем бинаре,
+    невалидном конфиге и занятом порте. Если ядро уже сказало причину
+    (``clientwrite.core_diag``), показываем ЕЁ — её видно и в журнале, и в
+    карточке («Не удалось: …»).
+    """
+    try:
+        r = CW.last_core_reason()
+    except Exception:
+        r = ""
+    return (str(r) or "серверы пула не отвечают")[:220]
+
+
+def _fail_card_due(lg, what: str = "") -> bool:
+    """Пора ли писать ПРОВАЛ в состояние: не чаще раза в FAIL_CARD_MIN_S.
+
+    Раньше 60-секундный порог соблюдался ТОЛЬКО в _outage_done, а _tray_settle
+    писал провал напрямую своим новым ``proc.id`` — при мёртвом ядре цикл шёл
+    каждые ~10 с, и помощник рисовал по новому id НОВУЮ карточку. Теперь порог
+    один на все пути провала.
+    """
+    global _LAST_FAIL_CARD_TS
+    now = time.time()
+    if now - _LAST_FAIL_CARD_TS < FAIL_CARD_MIN_S:
+        lg.info("Watch: провал%s уже показан %.0f с назад (порог %.0f с) — "
+                "карточку не повторяю, только журнал"
+                % ((" (%s)" % what) if what else "",
+                   now - _LAST_FAIL_CARD_TS, FAIL_CARD_MIN_S))
+        return False
+    _LAST_FAIL_CARD_TS = now
+    return True
 
 
 # ── РЕАЛЬНЫЙ ОБРЫВ -> карточка уведомления ────────────────────────────────
@@ -107,6 +145,18 @@ def _tray_settle(cfg: dict, client: dict, proc, lg, rtt=None) -> None:
 # 712 мс; порог 250 мс отделяет одно от другого с запасом ~3x и при этом не
 # зависит от частоты опроса (сторож замечает смерть порта за 50-350 мс).
 NOTIFY_MIN_GAP_MS = 250.0
+
+# ── ПАУЗА ВМЕСТО ГОРЯЧЕГО ЦИКЛА ───────────────────────────────────────────
+# Живой KWin вскрыл: при мёртвом ядре и пустом/нерабочем пуле «пульс порта»
+# замечает смерть за 50-350 мс, вызывает полный цикл, тот не находит серверов и
+# возвращается — и всё повторяется. В журнале было ×191 за 60 с: это и поток
+# карточек, и лишняя нагрузка (перебор источников, запуски ядра). Теперь после
+# КАЖДОЙ неудачи восстановления сторож выдерживает паузу 10/20/40/60 с, а не
+# крутит цикл подряд. Успех сбрасывает счётчик.
+BACKOFF_S = (10.0, 20.0, 40.0, 60.0)
+# Провал восстановления показываем карточкой не чаще раза в 60 с.
+FAIL_CARD_MIN_S = 60.0
+_LAST_FAIL_CARD_TS = 0.0
 
 
 def _notify_gap_ms(cfg: dict) -> float:
@@ -151,16 +201,30 @@ def _outage_done(cfg: dict, t_lost: float, t_now: float, lg, ok: bool = True,
     Возвращает замеренный разрыв в мс. Пишет состояние и описание процесса так,
     чтобы помощник интерфейса показал ОДНУ карточку состава макета (заголовок,
     подпись, этапы с мс, полоса, спиннер, футер) — и по провалу, и по успеху.
+
+    АНТИСПАМ (регрессия на живом KWin): провал восстановления пишется в состояние
+    НЕ ЧАЩЕ раза в 60 с. Каждая запись — новый номер процесса, а помощник рисует
+    карточку на новый номер; при мёртвом пуле цикл шёл ~3 раза в секунду, и
+    пользователь получал поток окон (в журнале ×191 за 60 с). Повтор — только
+    строка в журнале и «сердцебиение» состояния.
     """
+    global _LAST_FAIL_CARD_TS
     gap = _outage_gap_ms(cfg, t_lost, t_now)
     total = max(gap, (float(t_now) - float(t_lost)) * 1000.0)
     steps = _outage_steps(gap, total)
     if not ok:
+        if not _fail_card_due(lg, "обрыв"):
+            try:
+                TS.beat(cfg, "down", _tip("НЕТ СВЯЗИ"))
+            except Exception:
+                pass
+            return gap
         try:
             proc = TS.make_proc("restore", "outage", steps, eta_s=total / 1000.0)
             proc["started"] = float(t_lost)
-            TS.fail_proc(cfg, proc, "down", _tip("НЕТ СВЯЗИ"),
-                         reason="серверы пула не отвечают")
+            reason = _fail_reason()
+            lg.error(f"Watch: обрыв {gap:.0f} мс — причина: {reason}")
+            TS.fail_proc(cfg, proc, "down", _tip("НЕТ СВЯЗИ"), reason=reason)
             lg.info(f"Watch: обрыв {gap:.0f} мс — карточка провала показана")
         except Exception as e:
             lg.warn(f"Watch: карточка провала: {e}")
@@ -189,7 +253,15 @@ def run_watch(cfg: dict, stop_event=None, full_cycle=None, once: bool = False,
     lg = log.get_logger()
     client = client or CFG.find_client(cfg)
     if not client.get("core"):
-        lg.error("Watch: ядро xray не найдено — сторож остановлен")
+        # ПРИЧИНА в журнал, а не только «не найдено»: путь, где искали, и что
+        # мешает (каталог только для чтения, нет файла, нет прав на запуск).
+        try:
+            reason = CW.core_diag(client, cfg)
+            CW._set_core_reason(cfg, reason)
+            lg.error("Watch: ядро xray не найдено — сторож остановлен. ПРИЧИНА: "
+                     + reason)
+        except Exception:
+            lg.error("Watch: ядро xray не найдено — сторож остановлен")
         return 2
 
     wc = cfg.get("watch", {})
@@ -204,6 +276,7 @@ def run_watch(cfg: dict, stop_event=None, full_cycle=None, once: bool = False,
     strict_every_ticks = max(3, int(float(wc.get("strict_check_every_s", 300)) / max(1.0, interval)))
     burst_every_ticks = max(1, int(float(wc.get("burst_probe_every_s", 60)) / max(1.0, interval)))
     yt_fails = 0
+    fail_streak = 0                # неудач восстановления ПОДРЯД (для паузы)
     port = int(client.get("socks_port", 10808))
 
     def _stopped() -> bool:
@@ -214,6 +287,24 @@ def run_watch(cfg: dict, stop_event=None, full_cycle=None, once: bool = False,
             stop_event.wait(sec)
         else:
             time.sleep(sec)
+
+    def _recover_pause() -> float:
+        """ПАУЗА после неудачи восстановления — вместо горячего цикла.
+
+        Возвращает выдержанные секунды. Ряд 10/20/40/60: первая пауза короткая
+        (пул мог моргнуть), дальше — чтобы не жечь процессор, не дёргать
+        источники и не плодить записи состояния.
+        """
+        nonlocal fail_streak
+        fail_streak += 1
+        sec = BACKOFF_S[min(fail_streak - 1, len(BACKOFF_S) - 1)]
+        try:
+            lg.warn(f"Watch: восстановление не удалось ({fail_streak}-й раз "
+                    f"подряд) — пауза {sec:.0f} с (без горячего цикла)")
+        except Exception:
+            pass
+        _sleep(sec)
+        return sec
 
     lg.info(f"Watch: сторож-балансировщик запущен (интервал {interval:.0f}s, "
             f"probe {probe_timeout:.0f}s, пул {bal_n} серверов)")
@@ -318,6 +409,7 @@ def run_watch(cfg: dict, stop_event=None, full_cycle=None, once: bool = False,
 
         if ok:
             strikes = 0
+            fail_streak = 0            # связь есть — паузы сбрасываем
             ticks += 1
             try:
                 if time.time() - last_ok_mark > 2:
@@ -436,6 +528,9 @@ def run_watch(cfg: dict, stop_event=None, full_cycle=None, once: bool = False,
                     lg.warn("Watch: пул не помог — полный цикл (свежие серверы)")
                     if full_cycle:
                         full_cycle()
+                    _recover_pause()
+                else:
+                    fail_streak = 0
                 strikes = 0
 
         if once:
@@ -514,6 +609,9 @@ def run_watch(cfg: dict, stop_event=None, full_cycle=None, once: bool = False,
                 if full_cycle:
                     lg.warn("Watch: пульс не помог — полный цикл")
                     full_cycle()
+                _recover_pause()
+            else:
+                fail_streak = 0
             strikes = 0
     return 0
 
